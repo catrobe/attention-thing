@@ -13,6 +13,7 @@
 #include <termios.h>   // tcgetattr, tcsetattr: raw mode
 #include <unistd.h>    // read, write, isatty
 
+#define VERSION     "0.1.0"
 #define MAX_ENTRIES 128
 #define MAX_BODY    4096  // longest note text we keep, in bytes
 #define MAX_PICKS   3     // how many notes you pick at a time
@@ -1141,13 +1142,39 @@ int run_screen(int force_pick) {
 	return 0;
 }
 
+void print_usage(FILE *out) {
+	fprintf(out,
+		"atthing " VERSION " - one thing at a time\n"
+		"\n"
+		"usage:\n"
+		"  atthing            open it (the first time each day you pick up to 3)\n"
+		"  atthing pick       pick again\n"
+		"  atthing --help     this text\n"
+		"  atthing --version  the version\n"
+		"\n"
+		"notes folder: $ATTHING_DIR, or ~/Life/forgetme if it isn't set.\n"
+		"it needs now/ and try/ inside. atthing keeps its memory in .atthing/ there.\n"
+		"\n"
+		"keys:\n"
+		"  picking   type numbers + Enter, j/k scroll, q quit\n"
+		"  a note    d done, s skip, p park, f focus, q quit\n"
+		"  focus     space pause, f stop, d done\n");
+}
+
 int main(int argc, char **argv) {
 	int force_pick = 0;
 	if (argc > 1) {
 		if (strcmp(argv[1], "pick") == 0) {
 			force_pick = 1;   // "atthing pick": choose again
+		} else if (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0) {
+			print_usage(stdout);
+			return 0;
+		} else if (strcmp(argv[1], "--version") == 0 || strcmp(argv[1], "-v") == 0) {
+			printf("atthing %s\n", VERSION);
+			return 0;
 		} else {
-			fprintf(stderr, "usage: atthing [pick]\n");
+			fprintf(stderr, "atthing: unknown option '%s'\n\n", argv[1]);
+			print_usage(stderr);
 			return 2;
 		}
 	}

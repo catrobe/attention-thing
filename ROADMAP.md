@@ -7,23 +7,24 @@ The idea behind all of it: **one place that tells you what's next and helps you
 focus on it, instead of everything being open at once.** A feature belongs here
 if it closes things, not if it opens more.
 
-## v0.1: one thing at a time (in progress)
+## v0.1: one thing at a time (released)
 
 - [x] Find notes in `now/` and `try/`
 - [x] Read what's inside each note
 - [x] Full-screen view, one note at a time
-- [ ] Pick up to 3 notes for the day (new day at midnight)
-- [ ] Done / park a note, and keep a log of what you did
-- [ ] Focus mode with a timer
-- [ ] First release
+- [x] Pick up to 3 notes for the day (new day at midnight)
+- [x] Done / park a note, and keep a log of what you did
+- [x] Focus mode with a timer
+- [x] Remember when a note first appeared, not just when it last changed
+- [x] Count what's done today (3/3, 4/3...) and keep going
+- [x] `.txt` notes, sorting, skip sync-conflict files
+- [x] First release
 
 ## Next
 
-- Remember when a note first appeared, not just when it last changed
-- Count what's done today (3/3, 4/3...) and let you keep going
 - Set up the folders automatically in an empty directory
 - Choose the folder without an environment variable
-- `.txt` notes (#3), sorting (#5), ignore sync-conflict files (#4)
+- Timer that knows the estimate written in a note
 - Basic markdown rendering (bold, bullets, headings)
 - Edit a note inside the app
 
