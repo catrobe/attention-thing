@@ -20,6 +20,13 @@ if it closes things, not if it opens more.
 - [x] `.txt` notes, sorting, skip sync-conflict files
 - [x] First release
 
+## v0.2: after the first real use (released)
+
+- [x] Go back to the list from a note
+- [x] Change what you picked
+- [x] Arrow keys, Page Up/Down, mouse wheel
+- [x] Scroll long notes
+
 ## Next
 
 - Set up the folders automatically in an empty directory
