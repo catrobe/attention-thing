@@ -9,12 +9,14 @@
 #include <sys/stat.h> // stat
 
 #define MAX_ENTRIES 128
+#define MAX_BODY    4096  // longest note text we keep, in bytes
 
 typedef struct {
 	char   path[1024];  // full path to the .md files
 	char   title[256];  // file names without ".md"
 	char   bucket[16];  // "now" or "try"
 	time_t mtime;       // last modified, in seconds since 1970
+	char   body[MAX_BODY]; // text inside the note, "" if the note is empty
 } Entry;
 
 Entry entries[MAX_ENTRIES];
@@ -30,6 +32,44 @@ int ends_with(const char *s, const char *suffix) {
 	}
 	// s + (len_s - len_suffix) points at the last len_suffix characters of s
 	return strcmp(s + (len_s - len_suffix), suffix) == 0;
+}
+
+// Reads the text inside the file at path into body (at most size - 1 bytes).
+// If the file is empty or can't be opened, body becomes "".
+void read_body(const char *path, char *body, size_t size) {
+	body[0] = '\0';
+
+	FILE *f = fopen(path, "r");
+	if (f == NULL) {
+		return;
+	}
+	size_t n = fread(body, 1, size - 1, f);
+	fclose(f);
+	body[n] = '\0';
+
+	// drop newlines and spaces at the very end
+	while (n > 0 && (body[n - 1] == '\n' || body[n - 1] == '\r' ||
+	                 body[n - 1] == ' '  || body[n - 1] == '\t')) {
+		n--;
+		body[n] = '\0';
+	}
+}
+
+// Prints text with every line pushed 6 spaces to the right, so it sits under
+// the title. Prints nothing for an empty note. (Temporary: Step 4 replaces
+// this with a real screen.)
+void print_indented(const char *text) {
+	if (text[0] == '\0') {
+		return;
+	}
+	printf("      ");
+	for (const char *p = text; *p != '\0'; p++) {
+		putchar(*p);
+		if (*p == '\n') {
+			printf("      ");
+		}
+	}
+	putchar('\n');
 }
 
 // Adds every .md file inside base/bucket to entries[].
@@ -56,6 +96,7 @@ void bucket_scan(const char *base, const char *bucket) {
 
 		snprintf(e->path, sizeof e->path, "%s/%s", dir, ent->d_name);
 		snprintf(e->bucket, sizeof e->bucket, "%s", bucket);
+		read_body(e->path, e->body, sizeof e->body);
 
 		snprintf(e->title, sizeof e->title, "%s", ent->d_name);
 		e->title[strlen(e->title) - 3] = '\0';   // cut off ".md"
@@ -98,6 +139,7 @@ int main(void) {
 
 	for (int i = 0; i < n_entries; i++) {
 		printf("[%s] %s\n", entries[i].bucket, entries[i].title);
+		print_indented(entries[i].body);
 	}
 
 	return 0;
