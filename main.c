@@ -108,6 +108,15 @@ long days_between(time_t from, time_t to) {
 	return (long)((seconds + 43200) / 86400);   // round, in case of summer time
 }
 
+// 75 -> "01:15", 3725 -> "1:02:05"
+void format_duration(long seconds, char *out, size_t size) {
+	if (seconds >= 3600) {
+		snprintf(out, size, "%ld:%02ld:%02ld", seconds / 3600, (seconds / 60) % 60, seconds % 60);
+	} else {
+		snprintf(out, size, "%02ld:%02ld", seconds / 60, seconds % 60);
+	}
+}
+
 // ---- Saving files safely ------------------------------------------------------
 // We write to "file.tmp" first and then rename it over the real file. rename()
 // swaps the file in one step, so a crash or a sync never sees a half-written file.
@@ -636,13 +645,26 @@ void upper(const char *in, char *out, size_t size) {
 
 // ---- Screens ------------------------------------------------------------------------
 
-enum { VIEW_PICK, VIEW_NOTE, VIEW_DONE } view;
+enum { VIEW_PICK, VIEW_NOTE, VIEW_DONE, VIEW_FOCUS } view;
 
 int current = 0;          // which of today's picks is on screen
 char status[256] = "";    // a one-line message, e.g. an error
 char input[64] = "";      // what's typed on the pick screen
 int input_len = 0;
 int scroll = 0;           // first visible line of the pick list
+
+// The focus timer. Pausing adds the running part to focus_before.
+time_t focus_start;       // when the timer last started or resumed
+long focus_before = 0;    // seconds counted before the last pause
+int focus_paused = 0;
+long focus_shown = -1;    // the second currently on screen
+
+long focus_seconds(void) {
+	if (focus_paused) {
+		return focus_before;
+	}
+	return focus_before + (long)difftime(time(NULL), focus_start);
+}
 
 // ---- Actions ----------------------------------------------------------------------
 
@@ -741,7 +763,7 @@ int finish_pick(int park) {
 	}
 	remove_pick(current);
 	save_today();
-	reload();
+	reload();   // find the notes again, now that one has moved
 	if (current >= n_picks) {
 		current = 0;
 	}
@@ -836,7 +858,7 @@ void draw_note_screen(void) {
 	if (status[0] != '\0') {
 		draw_styled("\x1b[2m", status, rows - 2, left, width, 1);
 	}
-	draw_wrapped("[d]one  [s]kip  [p]ark  [q]uit", rows, left, width, 1);
+	draw_wrapped("[d]one  [s]kip  [p]ark  [f]ocus  [q]uit", rows, left, width, 1);
 
 	write_all(frame, frame_len);
 }
@@ -862,11 +884,47 @@ void draw_done_screen(void) {
 	write_all(frame, frame_len);
 }
 
+// Focus mode: only the note and the timer.
+void draw_focus_screen(void) {
+	int rows, cols;
+	if (begin_frame(&rows, &cols) == -1) {
+		write_all(frame, frame_len);
+		return;
+	}
+	int left = 3;
+	int width = cols - 4;
+	int index = find_entry(picks[current]);
+	if (index == -1) {
+		write_all(frame, frame_len);
+		return;
+	}
+	Entry *e = &entries[index];
+
+	draw_styled("\x1b[2m", focus_paused ? "FOCUS · paused" : "FOCUS", 2, left, width, 1);
+	int title_rows = draw_styled("\x1b[1m", e->title, 4, left, width, 2);
+	int body_top = 4 + title_rows + 1;
+	int body_rows = (rows - 5) - body_top;
+	draw_wrapped(e->body, body_top, left, width, body_rows);
+
+	focus_shown = focus_seconds();
+	char timer[32];
+	format_duration(focus_shown, timer, sizeof timer);
+	int timer_col = (cols - (int)strlen(timer)) / 2 + 1;   // centered
+	draw_styled("\x1b[1m", timer, rows - 3, timer_col, width, 1);
+
+	draw_wrapped(focus_paused ? "[space] resume  [f] stop  [d]one"
+	                          : "[space] pause  [f] stop  [d]one",
+	             rows, left, width, 1);
+	write_all(frame, frame_len);
+}
+
 void draw_screen(void) {
 	if (view == VIEW_PICK) {
 		draw_pick_screen();
 	} else if (view == VIEW_NOTE) {
 		draw_note_screen();
+	} else if (view == VIEW_FOCUS) {
+		draw_focus_screen();
 	} else {
 		draw_done_screen();
 	}
@@ -956,10 +1014,49 @@ int note_key(char c) {
 		return 1;
 	} else if (c == 's') {
 		current = (current + 1) % n_picks;   // after the last pick, back to the first
+	} else if (c == 'f') {
+		focus_before = 0;
+		focus_start = time(NULL);
+		focus_paused = 0;
+		view = VIEW_FOCUS;
 	} else if (c == 'd') {
 		finish_pick(0);
 	} else if (c == 'p') {
 		finish_pick(1);
+	}
+	return 0;
+}
+
+// Stops the timer and writes the time spent into the log.
+void stop_focus(void) {
+	int index = find_entry(picks[current]);
+	if (index != -1) {
+		char spent[32];
+		format_duration(focus_seconds(), spent, sizeof spent);
+		log_action("focus", &entries[index], spent);
+	}
+	view = VIEW_NOTE;
+}
+
+// A key in focus mode. Returns 1 to quit.
+int focus_key(char c) {
+	status[0] = '\0';
+	if (c == 'q' || c == 3) {
+		stop_focus();
+		return 1;
+	} else if (c == ' ') {
+		if (focus_paused) {
+			focus_start = time(NULL);   // resume: count from now
+			focus_paused = 0;
+		} else {
+			focus_before = focus_seconds();   // pause: keep what we have so far
+			focus_paused = 1;
+		}
+	} else if (c == 'f') {
+		stop_focus();
+	} else if (c == 'd') {
+		stop_focus();
+		finish_pick(0);
 	}
 	return 0;
 }
@@ -1009,6 +1106,9 @@ int run_screen(int force_pick) {
 			last_cols = cols;
 			redraw = 1;
 		}
+		if (view == VIEW_FOCUS && focus_seconds() != focus_shown) {
+			redraw = 1;   // the timer moved on by a second
+		}
 		if (redraw) {
 			draw_screen();
 			redraw = 0;
@@ -1028,6 +1128,8 @@ int run_screen(int force_pick) {
 			quit = pick_key(c);
 		} else if (view == VIEW_NOTE) {
 			quit = note_key(c);
+		} else if (view == VIEW_FOCUS) {
+			quit = focus_key(c);
 		} else {
 			quit = done_key(c);
 		}
