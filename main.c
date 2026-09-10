@@ -17,6 +17,7 @@
 #define MAX_BODY    4096  // longest note text we keep, in bytes
 #define MAX_PICKS   3     // how many notes you pick at a time
 #define MAX_SEEN    1024  // how many first-seen dates we remember
+#define DAILY_GOAL  3     // the "/3" in "done 2/3"
 
 typedef struct {
 	char   path[1024];     // full path to the note file
@@ -635,13 +636,118 @@ void upper(const char *in, char *out, size_t size) {
 
 // ---- Screens ------------------------------------------------------------------------
 
-enum { VIEW_PICK, VIEW_NOTE } view;
+enum { VIEW_PICK, VIEW_NOTE, VIEW_DONE } view;
 
 int current = 0;          // which of today's picks is on screen
 char status[256] = "";    // a one-line message, e.g. an error
 char input[64] = "";      // what's typed on the pick screen
 int input_len = 0;
 int scroll = 0;           // first visible line of the pick list
+
+// ---- Actions ----------------------------------------------------------------------
+
+// Adds one line to .atthing/log, e.g. "2026-09-10 14:22  done   now/cubesat.md".
+// `extra` goes at the end of the line; pass "" for nothing.
+void log_action(const char *action, const Entry *e, const char *extra) {
+	char path[1024], stamp[32];
+	snprintf(path, sizeof path, "%s/log", state_dir);
+	time_t now = time(NULL);
+	struct tm *tm = localtime(&now);
+	if (tm == NULL || strftime(stamp, sizeof stamp, "%Y-%m-%d %H:%M", tm) == 0) {
+		snprintf(stamp, sizeof stamp, "0000-00-00 00:00");
+	}
+	FILE *f = fopen(path, "a");   // "a": add to the end, create the file if needed
+	if (f == NULL) {
+		return;
+	}
+	fprintf(f, "%s  %-5s  %s/%s%s%s\n", stamp, action, e->bucket, e->name,
+	        extra[0] != '\0' ? "  " : "", extra);
+	fclose(f);
+}
+
+// Moves a note into the folder `to` (inside base), creating the folder if needed.
+// Never overwrites: if the name is taken there, it becomes "name (2).md", "name (3).md"...
+// Returns 0 if it worked, -1 if not (errno says why).
+int move_note(const Entry *e, const char *to) {
+	char dir[1024], dest[1400];
+	snprintf(dir, sizeof dir, "%s/%s", base, to);
+	if (ensure_dir(dir) == -1) {
+		return -1;
+	}
+	snprintf(dest, sizeof dest, "%s/%s", dir, e->name);
+
+	const char *dot = strrchr(e->name, '.');
+	int stem = (dot != NULL) ? (int)(dot - e->name) : (int)strlen(e->name);
+	struct stat st;
+	for (int i = 2; stat(dest, &st) == 0; i++) {   // stat() == 0 means the name is taken
+		if (i > 99) {
+			errno = EEXIST;
+			return -1;
+		}
+		snprintf(dest, sizeof dest, "%s/%.*s (%d)%s", dir, stem, e->name, i, dot != NULL ? dot : "");
+	}
+	return rename(e->path, dest);
+}
+
+// Parks a note: moves it to someday/ and adds "- title (parked 2026-09-10)" to
+// Parked.md. Parked is a status, not a lost note.
+int park_note(const Entry *e) {
+	if (move_note(e, "someday") == -1) {
+		return -1;
+	}
+	char path[1024], date[16];
+	snprintf(path, sizeof path, "%s/Parked.md", base);
+	date_string(time(NULL), date, sizeof date);
+
+	FILE *f = fopen(path, "a+");   // read and add to the end
+	if (f == NULL) {
+		return -1;
+	}
+	// if the file doesn't end with a newline, add one first
+	if (fseek(f, -1, SEEK_END) == 0 && fgetc(f) != '\n') {
+		fseek(f, 0, SEEK_END);
+		fputc('\n', f);
+	}
+	fseek(f, 0, SEEK_END);
+	fprintf(f, "- %s (parked %s)\n", e->title, date);
+	return fclose(f) == 0 ? 0 : -1;
+}
+
+// Removes picks[i]; the picks after it move up by one.
+void remove_pick(int i) {
+	for (int j = i; j < n_picks - 1; j++) {
+		memcpy(picks[j], picks[j + 1], sizeof picks[j]);
+	}
+	n_picks--;
+}
+
+// Finishes the pick on screen: done (to Done/) or parked (to someday/).
+// Returns 0 if it worked, -1 with a message in `status` if not.
+int finish_pick(int park) {
+	int index = find_entry(picks[current]);
+	if (index == -1) {
+		return -1;
+	}
+	Entry e = entries[index];   // a copy, because reload() below refills entries[]
+
+	int result = park ? park_note(&e) : move_note(&e, "Done");
+	if (result == -1) {
+		snprintf(status, sizeof status, "couldn't move it: %s", strerror(errno));
+		return -1;
+	}
+	log_action(park ? "park" : "done", &e, "");
+	if (!park) {
+		done_today++;
+	}
+	remove_pick(current);
+	save_today();
+	reload();
+	if (current >= n_picks) {
+		current = 0;
+	}
+	view = (n_picks == 0) ? VIEW_DONE : VIEW_NOTE;
+	return 0;
+}
 
 void draw_pick_screen(void) {
 	int rows, cols;
@@ -652,7 +758,9 @@ void draw_pick_screen(void) {
 	int left = 3;
 	int width = cols - 4;
 
-	draw_styled("\x1b[2m", "PICK UP TO 3", 2, left, width, 1);
+	char head[64];
+	snprintf(head, sizeof head, "PICK UP TO %d · done %d/%d", MAX_PICKS, done_today, DAILY_GOAL);
+	draw_styled("\x1b[2m", head, 2, left, width, 1);
 
 	int list_top = 4;
 	int list_rows = rows - 4 - list_top;   // leave room for status, input, keys
@@ -703,7 +811,7 @@ void draw_note_screen(void) {
 	}
 	Entry *e = &entries[index];
 
-	// header: NOW · 12 days · 2 of 3
+	// header: NOW · 12 days · 2 of 3 · done 1/3
 	char bucket[16], age[32], header[160];
 	upper(e->bucket, bucket, sizeof bucket);
 	long days = days_between(e->first_seen, time(NULL));
@@ -714,7 +822,8 @@ void draw_note_screen(void) {
 	} else {
 		snprintf(age, sizeof age, "%ld days", days);
 	}
-	snprintf(header, sizeof header, "%s · %s · %d of %d", bucket, age, current + 1, n_picks);
+	snprintf(header, sizeof header, "%s · %s · %d of %d · done %d/%d",
+	         bucket, age, current + 1, n_picks, done_today, DAILY_GOAL);
 	draw_styled("\x1b[2m", header, 2, left, width, 1);
 
 	int title_rows = draw_styled("\x1b[1m", e->title, 4, left, width, 2);
@@ -732,11 +841,34 @@ void draw_note_screen(void) {
 	write_all(frame, frame_len);
 }
 
+// Shown when every pick is done or parked.
+void draw_done_screen(void) {
+	int rows, cols;
+	if (begin_frame(&rows, &cols) == -1) {
+		write_all(frame, frame_len);
+		return;
+	}
+	int left = 3;
+	int width = cols - 4;
+	char line[64];
+	snprintf(line, sizeof line, "done %d/%d", done_today, DAILY_GOAL);
+	draw_styled("\x1b[1m", line, 4, left, width, 1);
+	draw_wrapped(n_entries == 0 ? "nothing left in now/ or try/" : "nothing picked right now",
+	             6, left, width, 1);
+	if (status[0] != '\0') {
+		draw_styled("\x1b[2m", status, rows - 2, left, width, 1);
+	}
+	draw_wrapped("[n] pick more  [q]uit", rows, left, width, 1);
+	write_all(frame, frame_len);
+}
+
 void draw_screen(void) {
 	if (view == VIEW_PICK) {
 		draw_pick_screen();
-	} else {
+	} else if (view == VIEW_NOTE) {
 		draw_note_screen();
+	} else {
+		draw_done_screen();
 	}
 }
 
@@ -784,6 +916,7 @@ int confirm_picks(void) {
 	n_picks = count;
 	for (int i = 0; i < count; i++) {
 		snprintf(picks[i], sizeof picks[i], "%s/%s", entries[chosen[i]].bucket, entries[chosen[i]].name);
+		log_action("pick", &entries[chosen[i]], "");
 	}
 	save_today();
 	return 0;
@@ -823,8 +956,22 @@ int note_key(char c) {
 		return 1;
 	} else if (c == 's') {
 		current = (current + 1) % n_picks;   // after the last pick, back to the first
-	} else if (c == 'd' || c == 'p') {
-		snprintf(status, sizeof status, "not yet: this key works in a later step");
+	} else if (c == 'd') {
+		finish_pick(0);
+	} else if (c == 'p') {
+		finish_pick(1);
+	}
+	return 0;
+}
+
+// A key on the "done" screen. Returns 1 to quit.
+int done_key(char c) {
+	status[0] = '\0';
+	if (c == 'q' || c == 3) {
+		return 1;
+	} else if (c == 'n') {
+		scroll = 0;
+		view = VIEW_PICK;
 	}
 	return 0;
 }
@@ -836,7 +983,15 @@ int run_screen(int force_pick) {
 		return 1;
 	}
 	reload();
-	view = (force_pick || n_picks == 0) ? VIEW_PICK : VIEW_NOTE;
+	if (force_pick) {
+		view = VIEW_PICK;
+	} else if (n_picks > 0) {
+		view = VIEW_NOTE;
+	} else if (done_today > 0) {
+		view = VIEW_DONE;   // came back after finishing today's picks
+	} else {
+		view = VIEW_PICK;
+	}
 
 	if (enable_raw_mode() == -1) {
 		perror("atthing: can't set up the terminal");
@@ -868,7 +1023,14 @@ int run_screen(int force_pick) {
 			continue;   // no key within 0.1 seconds; check the size again
 		}
 
-		int quit = (view == VIEW_PICK) ? pick_key(c) : note_key(c);
+		int quit;
+		if (view == VIEW_PICK) {
+			quit = pick_key(c);
+		} else if (view == VIEW_NOTE) {
+			quit = note_key(c);
+		} else {
+			quit = done_key(c);
+		}
 		if (quit) {
 			break;
 		}
