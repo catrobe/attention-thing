@@ -494,6 +494,68 @@ void get_screen_size(int *rows, int *cols) {
 	}
 }
 
+// Special keys get numbers above 255, so they can't be mixed up with letters.
+enum {
+	KEY_NONE = -1,   // no key within 0.1 seconds
+	KEY_GONE = -2,   // the terminal went away
+	KEY_ESC = 1000,
+	KEY_UP,
+	KEY_DOWN,
+	KEY_PAGE_UP,
+	KEY_PAGE_DOWN
+};
+
+// Reads one key press. Arrow keys (and the mouse wheel, in most terminals) arrive
+// as a few bytes that start with Escape, like ESC [ A for up. They're joined into
+// one key here.
+int read_key(void) {
+	unsigned char c;
+	ssize_t got = read(STDIN_FILENO, &c, 1);
+	if (got == -1 && errno != EAGAIN) {
+		return KEY_GONE;
+	}
+	if (got != 1) {
+		return KEY_NONE;
+	}
+	if (c != 27) {
+		return c;   // a normal key
+	}
+
+	unsigned char kind;
+	if (read(STDIN_FILENO, &kind, 1) != 1) {
+		return KEY_ESC;   // nothing came after Escape: it was the Esc key itself
+	}
+	if (kind == 'O') {    // ESC O A: some terminals send arrows like this
+		unsigned char final;
+		if (read(STDIN_FILENO, &final, 1) != 1) return KEY_NONE;
+		if (final == 'A') return KEY_UP;
+		if (final == 'B') return KEY_DOWN;
+		return KEY_NONE;
+	}
+	if (kind != '[') {
+		return KEY_NONE;   // Alt + a key: not used
+	}
+
+	// ESC [, then maybe numbers and ';', then one final letter or '~'
+	char params[16];
+	int n = 0;
+	unsigned char b;
+	while (read(STDIN_FILENO, &b, 1) == 1) {
+		if (b >= 0x40 && b <= 0x7e) {   // the final byte
+			params[n] = '\0';
+			if (b == 'A') return KEY_UP;
+			if (b == 'B') return KEY_DOWN;
+			if (b == '~' && strcmp(params, "5") == 0) return KEY_PAGE_UP;
+			if (b == '~' && strcmp(params, "6") == 0) return KEY_PAGE_DOWN;
+			return KEY_NONE;   // some other special key
+		}
+		if (n < (int)sizeof params - 1) {
+			params[n++] = b;
+		}
+	}
+	return KEY_NONE;
+}
+
 // ---- Drawing ----------------------------------------------------------------------
 // The whole screen is built in one buffer, then written at once.
 // Writing piece by piece would make the screen flicker.
@@ -542,32 +604,57 @@ int char_len(const char *p) {
 	return n;
 }
 
-// Draws text starting at (row, col), wrapping between words at `width`
-// columns and using at most `max_rows` rows. If it doesn't all fit, the last
-// visible spot shows "…". Returns how many rows it used.
-int draw_wrapped(const char *text, int row, int col, int width, int max_rows) {
-	if (text[0] == '\0' || width <= 0 || max_rows <= 0) {
+// Where draw_text is while it lays text out in rows.
+typedef struct {
+	int row, col;   // where the first visible row goes on screen
+	int skip;       // how many rows of the text are scrolled away above
+	int last;       // the last row of the text that fits on screen
+	int r;          // which row of the text we're on (0 = first)
+	int x;          // how many columns this row already uses
+	int wrapped;    // did this row start because the one before was full?
+	int cut_x;      // where "…" goes if the text continues past `last`; -1 if it doesn't
+} Layout;
+
+int layout_visible(const Layout *l) {
+	return l->r >= l->skip && l->r <= l->last;
+}
+
+void layout_next_row(Layout *l, int wrapped) {
+	if (l->r == l->last) {
+		l->cut_x = l->x;   // leaving the last row on screen, and there's more text
+	}
+	l->r++;
+	l->x = 0;
+	l->wrapped = wrapped;
+	if (layout_visible(l)) {
+		frame_goto(l->row + l->r - l->skip, l->col);
+	}
+}
+
+// Lays text out in rows of `width` columns, wrapping between words, and draws
+// rows `skip` to `skip + max_rows - 1` of it at (row, col). If the text goes on
+// past that, the last spot shows "…". Returns how many rows the WHOLE text
+// needs, so callers can tell whether there's more to scroll to.
+int draw_text(const char *text, int row, int col, int width, int max_rows, int skip) {
+	if (text[0] == '\0' || width <= 0) {
 		return 0;
 	}
-	int r = 0;         // which row we're on, counting from 0
-	int x = 0;         // how many columns are used on this row
-	int wrapped = 0;   // did we just move to a new row because of width?
-	int cut = 0;       // ran out of rows before the text ended
+	Layout l = { row, col, skip, skip + max_rows - 1, 0, 0, 0, -1 };
+	if (layout_visible(&l)) {
+		frame_goto(row, col);
+	}
 	const char *p = text;
 
-	frame_goto(row, col);
 	while (*p != '\0') {
 		if (*p == '\n') {
-			if (r + 1 >= max_rows) { cut = 1; break; }
-			r++; x = 0; wrapped = 0;
-			frame_goto(row + r, col);
+			layout_next_row(&l, 0);
 			p++;
 			continue;
 		}
 		if (*p == ' ' || *p == '\t') {
-			if (!(x == 0 && wrapped) && x < width) {   // no spaces at the start of a wrapped row
-				frame_str(" ");
-				x++;
+			if (!(l.x == 0 && l.wrapped) && l.x < width) {   // no spaces at the start of a wrapped row
+				if (layout_visible(&l)) frame_str(" ");
+				l.x++;
 			}
 			p++;
 			continue;
@@ -585,34 +672,42 @@ int draw_wrapped(const char *text, int row, int col, int width, int max_rows) {
 			word_cols++;
 		}
 		// doesn't fit on this row, but would on a fresh one: wrap first
-		if (x > 0 && x + word_cols > width) {
-			if (r + 1 >= max_rows) { cut = 1; break; }
-			r++; x = 0; wrapped = 1;
-			frame_goto(row + r, col);
+		if (l.x > 0 && l.x + word_cols > width) {
+			layout_next_row(&l, 1);
 		}
 		// print the word, breaking it if it's wider than a whole row
 		while (p < end) {
-			if (x == width) {
-				if (r + 1 >= max_rows) { cut = 1; break; }
-				r++; x = 0; wrapped = 1;
-				frame_goto(row + r, col);
+			if (l.x == width) {
+				layout_next_row(&l, 1);
 			}
 			int n = char_len(p);
 			if ((unsigned char)*p >= 0x20 && *p != 0x7f) {
-				frame_add(p, n);
-				x++;
+				if (layout_visible(&l)) frame_add(p, n);
+				l.x++;
 			}
 			p += n;
 		}
-		if (cut) {
-			break;
-		}
 	}
-	if (cut) {
-		frame_goto(row + r, col + (x < width ? x : width - 1));
+	if (l.cut_x >= 0) {
+		frame_goto(row + l.last - skip, col + (l.cut_x < width ? l.cut_x : width - 1));
 		frame_str("…");
 	}
-	return r + 1;
+	return l.r + 1;
+}
+
+// How many rows text needs at this width. Draws nothing.
+int text_rows(const char *text, int width) {
+	return draw_text(text, 0, 0, width, 0, 0);
+}
+
+// Draws text from its first row, using at most max_rows rows.
+// Returns how many rows it used on screen.
+int draw_wrapped(const char *text, int row, int col, int width, int max_rows) {
+	if (max_rows <= 0) {
+		return 0;
+	}
+	int needed = draw_text(text, row, col, width, max_rows, 0);
+	return needed < max_rows ? needed : max_rows;
 }
 
 // Draws text in a style: "\x1b[1m" bold, "\x1b[2m" dim. Returns rows used.
@@ -653,6 +748,7 @@ char status[256] = "";    // a one-line message, e.g. an error
 char input[64] = "";      // what's typed on the pick screen
 int input_len = 0;
 int scroll = 0;           // first visible line of the pick list
+int body_scroll = 0;      // how many rows of the note's text are scrolled away
 
 // The focus timer. Pausing adds the running part to focus_before.
 time_t focus_start;       // when the timer last started or resumed
@@ -768,8 +864,30 @@ int finish_pick(int park) {
 	if (current >= n_picks) {
 		current = 0;
 	}
+	body_scroll = 0;
 	view = (n_picks == 0) ? VIEW_DONE : VIEW_NOTE;
 	return 0;
+}
+
+// Draws a note's text in the rows it has, scrolled by body_scroll, plus a hint
+// on `hint_row` when it doesn't all fit.
+void draw_body(const Entry *e, int top, int rows, int left, int width, int hint_row) {
+	int needed = text_rows(e->body, width);
+	int most = needed - rows;          // the furthest it can scroll
+	if (body_scroll > most) body_scroll = most;
+	if (body_scroll < 0) body_scroll = 0;
+	draw_text(e->body, top, left, width, rows, body_scroll);
+
+	if (needed > rows && status[0] == '\0') {
+		char hint[64];
+		int below = needed - (body_scroll + rows);
+		if (below > 0) {
+			snprintf(hint, sizeof hint, "j/k scroll · %d more line%s", below, below == 1 ? "" : "s");
+		} else {
+			snprintf(hint, sizeof hint, "j/k scroll");
+		}
+		draw_styled("\x1b[2m", hint, hint_row, left, width, 1);
+	}
 }
 
 void draw_pick_screen(void) {
@@ -813,7 +931,11 @@ void draw_pick_screen(void) {
 	char prompt[128];
 	snprintf(prompt, sizeof prompt, "type numbers, then Enter: %s_", input);
 	draw_wrapped(prompt, rows - 2, left, width, 1);
-	draw_wrapped("[j/k] scroll  [q]uit", rows, left, width, 1);
+	char keys[64];
+	snprintf(keys, sizeof keys, "%s%s[q]uit",
+	         n_entries > list_rows ? "[j/k] scroll  " : "",
+	         (n_picks > 0 || done_today > 0) ? "[Esc] back  " : "");
+	draw_wrapped(keys, rows, left, width, 1);
 
 	write_all(frame, frame_len);
 }
@@ -854,12 +976,14 @@ void draw_note_screen(void) {
 	// body: everything between the title and the bottom lines
 	int body_top = 4 + title_rows + 1;
 	int body_rows = (rows - 3) - body_top;
-	draw_wrapped(e->body, body_top, left, width, body_rows);
+	draw_body(e, body_top, body_rows, left, width, rows - 2);
 
 	if (status[0] != '\0') {
 		draw_styled("\x1b[2m", status, rows - 2, left, width, 1);
 	}
-	draw_wrapped("[d]one  [s]kip  [p]ark  [f]ocus  [q]uit", rows, left, width, 1);
+	draw_wrapped(width >= 47 ? "[d]one  [s]kip  [p]ark  [f]ocus  [l]ist  [q]uit"
+	                         : "[d]one [s]kip [p]ark [f]ocus [l]ist [q]uit",   // narrow window
+	             rows, left, width, 1);
 
 	write_all(frame, frame_len);
 }
@@ -881,7 +1005,7 @@ void draw_done_screen(void) {
 	if (status[0] != '\0') {
 		draw_styled("\x1b[2m", status, rows - 2, left, width, 1);
 	}
-	draw_wrapped("[n] pick more  [q]uit", rows, left, width, 1);
+	draw_wrapped("[l]ist  [q]uit", rows, left, width, 1);
 	write_all(frame, frame_len);
 }
 
@@ -905,7 +1029,7 @@ void draw_focus_screen(void) {
 	int title_rows = draw_styled("\x1b[1m", e->title, 4, left, width, 2);
 	int body_top = 4 + title_rows + 1;
 	int body_rows = (rows - 5) - body_top;
-	draw_wrapped(e->body, body_top, left, width, body_rows);
+	draw_body(e, body_top, body_rows, left, width, rows - 2);
 
 	focus_shown = focus_seconds();
 	char timer[32];
@@ -972,57 +1096,115 @@ int confirm_picks(void) {
 		return -1;
 	}
 
+	for (int i = 0; i < count; i++) {
+		if (!is_picked(chosen[i])) {
+			log_action("pick", &entries[chosen[i]], "");   // only log what's new
+		}
+	}
 	n_picks = count;
 	for (int i = 0; i < count; i++) {
 		snprintf(picks[i], sizeof picks[i], "%s/%s", entries[chosen[i]].bucket, entries[chosen[i]].name);
-		log_action("pick", &entries[chosen[i]], "");
 	}
 	save_today();
 	return 0;
 }
 
+// Opens the pick screen with today's picks already typed in, so they're easy
+// to change: Backspace one away, type another, Enter.
+void open_list(void) {
+	input_len = 0;
+	input[0] = '\0';
+	for (int i = 0; i < n_entries; i++) {
+		if (is_picked(i)) {
+			char number[16];
+			snprintf(number, sizeof number, "%d ", i + 1);
+			size_t len = strlen(number);
+			if ((size_t)input_len + len < sizeof input) {
+				memcpy(input + input_len, number, len + 1);
+				input_len += (int)len;
+			}
+		}
+	}
+	scroll = 0;
+	view = VIEW_PICK;
+}
+
 // A key on the pick screen. Returns 1 to quit.
-int pick_key(char c) {
+int pick_key(int key) {
 	status[0] = '\0';
-	if (c == 'q' || c == 3) {   // 3 is Ctrl-C
+	if (key == 'q' || key == 3) {   // 3 is Ctrl-C
 		return 1;
-	} else if (c == 'j') {
+	} else if (key == 'j' || key == KEY_DOWN) {
 		scroll++;
-	} else if (c == 'k') {
+	} else if (key == 'k' || key == KEY_UP) {
 		scroll--;
-	} else if ((c >= '0' && c <= '9') || c == ' ' || c == ',') {
+	} else if (key == KEY_PAGE_DOWN) {
+		scroll += 10;
+	} else if (key == KEY_PAGE_UP) {
+		scroll -= 10;
+	} else if (key == KEY_ESC || key == 'l') {
+		input_len = 0;   // back without changing anything
+		input[0] = '\0';
+		if (n_picks > 0) {
+			view = VIEW_NOTE;
+		} else if (done_today > 0) {
+			view = VIEW_DONE;
+		}
+	} else if ((key >= '0' && key <= '9') || key == ' ' || key == ',') {
 		if (input_len < (int)sizeof input - 1) {
-			input[input_len++] = c;
+			input[input_len++] = (char)key;
 			input[input_len] = '\0';
 		}
-	} else if ((c == 127 || c == 8) && input_len > 0) {   // Backspace
+	} else if ((key == 127 || key == 8) && input_len > 0) {   // Backspace
 		input[--input_len] = '\0';
-	} else if (c == '\r' || c == '\n') {
+	} else if (key == '\r' || key == '\n') {
 		if (confirm_picks() == 0) {
 			input_len = 0;
 			input[0] = '\0';
 			current = 0;
+			body_scroll = 0;
 			view = VIEW_NOTE;
 		}
 	}
 	return 0;
 }
 
+// j/k, arrows and Page Up/Down scroll a long note. Returns 1 if the key was one of those.
+int scroll_body_key(int key) {
+	if (key == 'j' || key == KEY_DOWN) {
+		body_scroll++;
+	} else if (key == 'k' || key == KEY_UP) {
+		body_scroll--;
+	} else if (key == KEY_PAGE_DOWN) {
+		body_scroll += 10;
+	} else if (key == KEY_PAGE_UP) {
+		body_scroll -= 10;
+	} else {
+		return 0;
+	}
+	return 1;   // draw_body keeps body_scroll in range
+}
+
 // A key on the note screen. Returns 1 to quit.
-int note_key(char c) {
+int note_key(int key) {
 	status[0] = '\0';
-	if (c == 'q' || c == 3) {
+	if (key == 'q' || key == 3) {
 		return 1;
-	} else if (c == 's') {
+	} else if (scroll_body_key(key)) {
+		// scrolled the note
+	} else if (key == 'l') {
+		open_list();
+	} else if (key == 's') {
 		current = (current + 1) % n_picks;   // after the last pick, back to the first
-	} else if (c == 'f') {
+		body_scroll = 0;
+	} else if (key == 'f') {
 		focus_before = 0;
 		focus_start = time(NULL);
 		focus_paused = 0;
 		view = VIEW_FOCUS;
-	} else if (c == 'd') {
+	} else if (key == 'd') {
 		finish_pick(0);
-	} else if (c == 'p') {
+	} else if (key == 'p') {
 		finish_pick(1);
 	}
 	return 0;
@@ -1040,12 +1222,14 @@ void stop_focus(void) {
 }
 
 // A key in focus mode. Returns 1 to quit.
-int focus_key(char c) {
+int focus_key(int key) {
 	status[0] = '\0';
-	if (c == 'q' || c == 3) {
+	if (key == 'q' || key == 3) {
 		stop_focus();
 		return 1;
-	} else if (c == ' ') {
+	} else if (scroll_body_key(key)) {
+		// scrolled the note
+	} else if (key == ' ') {
 		if (focus_paused) {
 			focus_start = time(NULL);   // resume: count from now
 			focus_paused = 0;
@@ -1053,9 +1237,9 @@ int focus_key(char c) {
 			focus_before = focus_seconds();   // pause: keep what we have so far
 			focus_paused = 1;
 		}
-	} else if (c == 'f') {
+	} else if (key == 'f') {
 		stop_focus();
-	} else if (c == 'd') {
+	} else if (key == 'd') {
 		stop_focus();
 		finish_pick(0);
 	}
@@ -1063,13 +1247,12 @@ int focus_key(char c) {
 }
 
 // A key on the "done" screen. Returns 1 to quit.
-int done_key(char c) {
+int done_key(int key) {
 	status[0] = '\0';
-	if (c == 'q' || c == 3) {
+	if (key == 'q' || key == 3) {
 		return 1;
-	} else if (c == 'n') {
-		scroll = 0;
-		view = VIEW_PICK;
+	} else if (key == 'l' || key == 'n') {
+		open_list();
 	}
 	return 0;
 }
@@ -1115,24 +1298,23 @@ int run_screen(int force_pick) {
 			redraw = 0;
 		}
 
-		char c;
-		ssize_t got = read(STDIN_FILENO, &c, 1);
-		if (got == -1 && errno != EAGAIN) {
+		int key = read_key();
+		if (key == KEY_GONE) {
 			return 1;   // the terminal went away
 		}
-		if (got != 1) {
+		if (key == KEY_NONE) {
 			continue;   // no key within 0.1 seconds; check the size again
 		}
 
 		int quit;
 		if (view == VIEW_PICK) {
-			quit = pick_key(c);
+			quit = pick_key(key);
 		} else if (view == VIEW_NOTE) {
-			quit = note_key(c);
+			quit = note_key(key);
 		} else if (view == VIEW_FOCUS) {
-			quit = focus_key(c);
+			quit = focus_key(key);
 		} else {
-			quit = done_key(c);
+			quit = done_key(key);
 		}
 		if (quit) {
 			break;
@@ -1156,9 +1338,9 @@ void print_usage(FILE *out) {
 		"it needs now/ and try/ inside. atthing keeps its memory in .atthing/ there.\n"
 		"\n"
 		"keys:\n"
-		"  picking   type numbers + Enter, j/k scroll, q quit\n"
-		"  a note    d done, s skip, p park, f focus, q quit\n"
-		"  focus     space pause, f stop, d done\n");
+		"  picking   type numbers + Enter, j/k or arrows scroll, Esc back, q quit\n"
+		"  a note    d done, s skip, p park, f focus, l list, j/k scroll, q quit\n"
+		"  focus     space pause, f stop, d done, j/k scroll\n");
 }
 
 int main(int argc, char **argv) {
