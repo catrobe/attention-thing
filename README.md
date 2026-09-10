@@ -1,6 +1,6 @@
 ## Attention Thing
 
-`atthing` shows you one thing to do next. Not a list, one thing.
+`atthing` things shouldn't and doesn't have to be complicated
 
 ### What
 It's an app that helps you to manage your chores and multiple interests in a clever way
