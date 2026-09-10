@@ -8,3 +8,6 @@ It connects a direcrtory of yours that contains text or md files and tags/moves 
 
 ### Early
 This is so new and there is so much waiting to be made yet stay tuned!
+
+---
+<sub>Honest: AI help is used on this project<sub>
