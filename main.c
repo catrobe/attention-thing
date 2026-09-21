@@ -852,7 +852,7 @@ void upper(const char *in, char *out, size_t size) {
 
 // ---- Screens ------------------------------------------------------------------------
 
-enum { VIEW_PICK, VIEW_NOTE, VIEW_DONE, VIEW_FOCUS } view;
+enum { VIEW_PICK, VIEW_NOTE, VIEW_DONE, VIEW_FOCUS, VIEW_HISTORY } view;
 
 int current = 0;          // which of today's picks is on screen
 char status[256] = "";    // a one-line message, e.g. an error
@@ -1124,7 +1124,7 @@ void draw_pick_screen(void) {
 	snprintf(prompt, sizeof prompt, "type numbers, then Enter: %s_", input);
 	draw_wrapped(prompt, rows - 2, left, width, 1);
 	char keys[96];
-	snprintf(keys, sizeof keys, "%s[r]efresh  %s[q]uit",
+	snprintf(keys, sizeof keys, "%s[r]efresh  [h]istory  %s[q]uit",
 	         visible_notes() > 1 ? "[j/k] up/down  [J/K] move  " : "",
 	         (n_picks > 0 || done_today > 0) ? "[Esc] back  " : "");
 	draw_keys(keys, rows, left, width);
@@ -1195,7 +1195,7 @@ void draw_done_screen(void) {
 	if (status[0] != '\0') {
 		draw_styled("\x1b[2m", status, rows - 2, left, width, 1);
 	}
-	draw_keys("[l]ist  [r]efresh  [q]uit", rows, left, width);
+	draw_keys("[l]ist  [r]efresh  [h]istory  [q]uit", rows, left, width);
 	write_all(frame, frame_len);
 }
 
@@ -1233,6 +1233,314 @@ void draw_focus_screen(void) {
 	write_all(frame, frame_len);
 }
 
+// ---- What you did (h): reads .atthing/log ------------------------------------
+// The log has one line per thing you did:
+//   2026-09-21 14:22  pick   now/cubesat.md
+//   2026-09-21 15:10  focus  now/cubesat.md  25:10
+//   2026-09-21 15:10  done   now/cubesat.md
+// Here it becomes one DayNote per note per day: what happened to it that day.
+
+#define MAX_HISTORY 1024   // note-days we keep; when full, the older half is forgotten
+
+typedef struct {
+	char date[16];     // "2026-09-21"
+	char note[300];    // "now/cubesat.md"
+	int  picked;       // 1 if it was picked that day
+	int  done;
+	int  parked;
+	long focus;        // seconds of focus that day
+} DayNote;
+
+DayNote history[MAX_HISTORY];
+int n_history = 0;
+int history_scroll = 0;   // how many lines are scrolled away above
+int history_back;         // the screen h came from, to go back to
+
+// "25:10" -> 1510 seconds, "1:02:05" -> 3725. Returns 0 if it isn't a time.
+long parse_duration(const char *s) {
+	long a, b, c;
+	int n = sscanf(s, "%ld:%ld:%ld", &a, &b, &c);
+	if (n == 3) return a * 3600 + b * 60 + c;
+	if (n == 2) return a * 60 + b;
+	return 0;
+}
+
+// 3900 -> "1h 05m", 1510 -> "25m", 20 -> "<1m". For totals, where seconds don't matter.
+void format_total(long seconds, char *out, size_t size) {
+	if (seconds >= 3600) {
+		snprintf(out, size, "%ldh %02ldm", seconds / 3600, (seconds / 60) % 60);
+	} else if (seconds >= 60) {
+		snprintf(out, size, "%ldm", seconds / 60);
+	} else {
+		snprintf(out, size, "<1m");
+	}
+}
+
+// The history is full: forget the older half. The cut moves on to where a new
+// day starts, so no day is left with only some of its notes.
+void forget_older_half(void) {
+	int cut = MAX_HISTORY / 2;
+	while (cut < n_history && strcmp(history[cut].date, history[cut - 1].date) == 0) {
+		cut++;
+	}
+	if (cut == n_history) {
+		cut = MAX_HISTORY / 2;   // one enormous day; cut it anyway
+	}
+	memmove(history, history + cut, (n_history - cut) * sizeof history[0]);
+	n_history -= cut;
+}
+
+// The DayNote for this note on this day. Makes a new one if there isn't one yet.
+// The log goes in time order, so the day we're on is always at the end.
+DayNote *day_note(const char *date, const char *note) {
+	for (int i = n_history - 1; i >= 0 && strcmp(history[i].date, date) == 0; i--) {
+		if (strcmp(history[i].note, note) == 0) {
+			return &history[i];
+		}
+	}
+	if (n_history == MAX_HISTORY) {
+		forget_older_half();
+	}
+	DayNote *d = &history[n_history];
+	n_history++;
+	memset(d, 0, sizeof *d);   // every field to 0 / ""
+	snprintf(d->date, sizeof d->date, "%s", date);
+	snprintf(d->note, sizeof d->note, "%s", note);
+	return d;
+}
+
+// Reads one log line into history[]. Skips lines it doesn't understand.
+void add_log_line(char *line) {
+	line[strcspn(line, "\r\n")] = '\0';
+	if (strlen(line) < 18 || parse_date(line) == (time_t)-1) {
+		return;
+	}
+	char date[16];
+	snprintf(date, sizeof date, "%.10s", line);   // the first 10 characters
+
+	char *p = line + 16;             // after "2026-09-21 14:22"
+	while (*p == ' ') p++;
+	char *action = p;                // "done", "focus"...
+	while (*p != '\0' && *p != ' ') p++;
+	if (*p == '\0') {
+		return;
+	}
+	*p = '\0';                       // end the action word here
+	p++;
+	while (*p == ' ') p++;
+	char *note = p;                  // "now/cubesat.md", maybe "  25:10" after it
+
+	long focus = 0;
+	if (strcmp(action, "focus") == 0) {
+		char *space = strrchr(note, ' ');   // the space before "25:10"
+		if (space == NULL) {
+			return;
+		}
+		focus = parse_duration(space + 1);
+		while (space > note && *space == ' ') {
+			*space = '\0';                  // cut "  25:10" off the note
+			space--;
+		}
+	} else if (strcmp(action, "pick") != 0 && strcmp(action, "done") != 0 &&
+	           strcmp(action, "park") != 0) {
+		return;
+	}
+
+	DayNote *d = day_note(date, note);
+	if (strcmp(action, "pick") == 0) d->picked = 1;
+	if (strcmp(action, "done") == 0) d->done = 1;
+	if (strcmp(action, "park") == 0) d->parked = 1;
+	d->focus += focus;
+}
+
+void load_history(void) {
+	n_history = 0;
+	char path[1024], line[1024];
+	snprintf(path, sizeof path, "%s/log", state_dir);
+	FILE *f = fopen(path, "r");
+	if (f == NULL) {
+		return;   // nothing done yet
+	}
+	while (fgets(line, sizeof line, f) != NULL) {
+		add_log_line(line);
+	}
+	fclose(f);
+}
+
+// The date this week's Monday had, as "2026-09-15".
+void week_start(char *out, size_t size) {
+	char today[16];
+	date_string(time(NULL), today, sizeof today);
+	time_t noon = parse_date(today);
+	struct tm *tm = localtime(&noon);
+	int since_monday = tm != NULL ? (tm->tm_wday + 6) % 7 : 0;   // tm_wday: 0 is Sunday
+	date_string(noon - (time_t)since_monday * 86400, out, size);   // noon, so summer time can't change the day
+}
+
+// "TODAY" or "SAT 20 SEP", for a day's heading.
+void day_label(const char *date, char *out, size_t size) {
+	char today[16];
+	date_string(time(NULL), today, sizeof today);
+	if (strcmp(date, today) == 0) {
+		snprintf(out, size, "TODAY");
+		return;
+	}
+	time_t noon = parse_date(date);
+	struct tm *tm = localtime(&noon);
+	char weekday[16], month[16], label[48];
+	if (tm == NULL || strftime(weekday, sizeof weekday, "%a", tm) == 0 ||
+	    strftime(month, sizeof month, "%b", tm) == 0) {
+		snprintf(out, size, "%s", date);
+		return;
+	}
+	snprintf(label, sizeof label, "%s %d %s", weekday, tm->tm_mday, month);
+	upper(label, out, size);
+}
+
+// What kind of line a DayNote gets. Done and parked are listed first, then
+// notes that were picked (or focused on) but not finished that day.
+enum { KIND_DONE, KIND_PARKED, KIND_PICKED };
+
+int note_kind(const DayNote *d) {
+	if (d->done) return KIND_DONE;
+	if (d->parked) return KIND_PARKED;
+	return KIND_PICKED;
+}
+
+// "TODAY · done 2 · parked 1 · focus 1h 05m" for history[start] to history[end].
+void day_heading(int start, int end, char *out, size_t size) {
+	int done = 0, parked = 0;
+	long focus = 0;
+	for (int i = start; i <= end; i++) {
+		done += history[i].done;
+		parked += history[i].parked;
+		focus += history[i].focus;
+	}
+	char label[48], part[48];
+	day_label(history[start].date, label, sizeof label);
+	snprintf(out, size, "%s", label);
+	if (done > 0) {
+		snprintf(part, sizeof part, " · done %d", done);
+		strncat(out, part, size - strlen(out) - 1);
+	}
+	if (parked > 0) {
+		snprintf(part, sizeof part, " · parked %d", parked);
+		strncat(out, part, size - strlen(out) - 1);
+	}
+	if (focus > 0) {
+		char total[16];
+		format_total(focus, total, sizeof total);
+		snprintf(part, sizeof part, " · focus %s", total);
+		strncat(out, part, size - strlen(out) - 1);
+	}
+}
+
+// One note's line: "done    call the dentist        25m". Picked-only lines are grey.
+void draw_day_note(const DayNote *d, int row, int left, int width) {
+	const char *labels[] = { "done", "parked", "picked" };
+	int kind = note_kind(d);
+
+	char title[300];
+	const char *slash = strrchr(d->note, '/');
+	snprintf(title, sizeof title, "%s", slash != NULL ? slash + 1 : d->note);
+	char *dot = strrchr(title, '.');
+	if (dot != NULL) {
+		*dot = '\0';   // cut off ".md" / ".txt"
+	}
+
+	char time_spent[16] = "";
+	if (d->focus > 0) {
+		format_total(d->focus, time_spent, sizeof time_spent);
+	}
+	int time_col = width - 8;   // room on the right for "1h 05m"
+
+	if (kind == KIND_PICKED) frame_str("\x1b[2m");
+	draw_wrapped(labels[kind], row, left + 2, 6, 1);
+	draw_wrapped(title, row, left + 10, time_col - 11, 1);
+	draw_wrapped(time_spent, row, left + time_col, 8, 1);
+	if (kind == KIND_PICKED) frame_str("\x1b[0m");
+}
+
+// Goes through the history line by line, newest day first: the day's heading,
+// its notes, a blank line. Draws the lines that are inside the window when
+// `draw` is 1. Returns how many lines there are in total.
+int history_lines(int draw, int top, int rows, int left, int width) {
+	int line = 0;
+	int end = n_history - 1;
+	while (end >= 0) {
+		int start = end;   // find where this day starts
+		while (start > 0 && strcmp(history[start - 1].date, history[end].date) == 0) {
+			start--;
+		}
+		int row = top + line - history_scroll;
+		if (draw && line >= history_scroll && line < history_scroll + rows) {
+			char heading[160];
+			day_heading(start, end, heading, sizeof heading);
+			draw_styled("\x1b[1m", heading, row, left, width, 1);
+		}
+		line++;
+		for (int kind = KIND_DONE; kind <= KIND_PICKED; kind++) {
+			for (int i = start; i <= end; i++) {
+				if (note_kind(&history[i]) != kind) {
+					continue;
+				}
+				row = top + line - history_scroll;
+				if (draw && line >= history_scroll && line < history_scroll + rows) {
+					draw_day_note(&history[i], row, left, width);
+				}
+				line++;
+			}
+		}
+		line++;   // blank line between days
+		end = start - 1;
+	}
+	return line;
+}
+
+void draw_history_screen(void) {
+	int rows, cols;
+	if (begin_frame(&rows, &cols) == -1) {
+		write_all(frame, frame_len);
+		return;
+	}
+	int left = 3;
+	int width = cols - 4;
+
+	// top line: this week, Monday to today
+	char monday[16], head[128];
+	week_start(monday, sizeof monday);
+	int week_done = 0;
+	long week_focus = 0;
+	for (int i = 0; i < n_history; i++) {
+		if (strcmp(history[i].date, monday) >= 0) {   // "2026-09-16" >= "2026-09-15": dates sort like text
+			week_done += history[i].done;
+			week_focus += history[i].focus;
+		}
+	}
+	snprintf(head, sizeof head, "WHAT YOU DID · this week: done %d", week_done);
+	if (week_focus > 0) {
+		char total[16], part[32];
+		format_total(week_focus, total, sizeof total);
+		snprintf(part, sizeof part, " · focus %s", total);
+		strncat(head, part, sizeof head - strlen(head) - 1);
+	}
+	draw_styled("\x1b[2m", head, 2, left, width, 1);
+
+	int top = 4;
+	int rows_for_days = rows - 2 - top;   // leave room for the keys line
+	int total = history_lines(0, top, rows_for_days, left, width);
+	if (history_scroll > total - rows_for_days) history_scroll = total - rows_for_days;
+	if (history_scroll < 0) history_scroll = 0;
+	history_lines(1, top, rows_for_days, left, width);
+	if (n_history == 0) {
+		draw_wrapped("nothing logged yet", top, left, width, 1);
+	}
+
+	draw_keys(total > rows_for_days ? "[j/k] scroll  [Esc] back  [q]uit" : "[Esc] back  [q]uit",
+	          rows, left, width);
+	write_all(frame, frame_len);
+}
+
 void draw_screen(void) {
 	if (view == VIEW_PICK) {
 		draw_pick_screen();
@@ -1240,6 +1548,8 @@ void draw_screen(void) {
 		draw_note_screen();
 	} else if (view == VIEW_FOCUS) {
 		draw_focus_screen();
+	} else if (view == VIEW_HISTORY) {
+		draw_history_screen();
 	} else {
 		draw_done_screen();
 	}
@@ -1423,6 +1733,14 @@ void refresh(void) {
 	snprintf(status, sizeof status, "refreshed · %d note%s", n_entries, n_entries == 1 ? "" : "s");
 }
 
+// h: opens "what you did". It reads the log fresh each time.
+void open_history(void) {
+	history_back = view;
+	load_history();
+	history_scroll = 0;
+	view = VIEW_HISTORY;
+}
+
 // A key on the pick screen. Returns 1 to quit.
 int pick_key(int key) {
 	status[0] = '\0';
@@ -1448,6 +1766,8 @@ int pick_key(int key) {
 		}
 	} else if (key == 'r') {
 		refresh();
+	} else if (key == 'h') {
+		open_history();
 	} else if (key == KEY_ESC || key == 'l') {
 		input_len = 0;   // back without changing anything
 		input[0] = '\0';
@@ -1502,6 +1822,8 @@ int note_key(int key) {
 		open_list();
 	} else if (key == 'r') {
 		refresh();
+	} else if (key == 'h') {
+		open_history();
 	} else if (key == 's') {
 		current = (current + 1) % n_picks;   // after the last pick, back to the first
 		body_scroll = 0;
@@ -1563,6 +1885,27 @@ int done_key(int key) {
 		open_list();
 	} else if (key == 'r') {
 		refresh();
+	} else if (key == 'h') {
+		open_history();
+	}
+	return 0;
+}
+
+// A key on "what you did". Returns 1 to quit.
+int history_key(int key) {
+	status[0] = '\0';
+	if (key == 'q' || key == 3) {
+		return 1;
+	} else if (key == KEY_ESC || key == 'h') {
+		view = history_back;   // back where you came from
+	} else if (key == 'j' || key == KEY_DOWN) {
+		history_scroll++;      // draw_history_screen keeps it in range
+	} else if (key == 'k' || key == KEY_UP) {
+		history_scroll--;
+	} else if (key == KEY_PAGE_DOWN) {
+		history_scroll += 10;
+	} else if (key == KEY_PAGE_UP) {
+		history_scroll -= 10;
 	}
 	return 0;
 }
@@ -1624,6 +1967,8 @@ int run_screen(int force_pick) {
 			quit = note_key(key);
 		} else if (view == VIEW_FOCUS) {
 			quit = focus_key(key);
+		} else if (view == VIEW_HISTORY) {
+			quit = history_key(key);
 		} else {
 			quit = done_key(key);
 		}
@@ -1649,12 +1994,13 @@ void print_usage(FILE *out) {
 		"it needs now/ and try/ inside. atthing keeps its memory in .atthing/ there.\n"
 		"\n"
 		"keys:\n"
-		"  picking   type numbers + Enter, Esc back, r refresh, q quit\n"
+		"  picking   type numbers + Enter, Esc back, r refresh, h history, q quit\n"
 		"            j/k or arrows go up/down, J/K or Shift+arrows move a note\n"
 		"            t shows or hides TRY\n"
 		"  a note    d done, s skip, p park, f focus, l list, r refresh\n"
-		"            j/k scroll, q quit\n"
-		"  focus     space pause, f stop, d done, j/k scroll\n");
+		"            h history, j/k scroll, q quit\n"
+		"  focus     space pause, f stop, d done, j/k scroll\n"
+		"  history   what you did, newest day first: j/k scroll, Esc or h back\n");
 }
 
 int main(int argc, char **argv) {
