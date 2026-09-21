@@ -1054,7 +1054,6 @@ void draw_list_note(int i, int row, int left, int width) {
 void draw_pick_screen(void) {
 	int rows, cols;
 	if (begin_frame(&rows, &cols) == -1) {
-		write_all(frame, frame_len);
 		return;
 	}
 	int left = 3;
@@ -1123,19 +1122,13 @@ void draw_pick_screen(void) {
 	char prompt[128];
 	snprintf(prompt, sizeof prompt, "type numbers, then Enter: %s_", input);
 	draw_wrapped(prompt, rows - 2, left, width, 1);
-	char keys[96];
-	snprintf(keys, sizeof keys, "%s[r]efresh  [h]istory  %s[q]uit",
-	         visible_notes() > 1 ? "[j/k] up/down  [J/K] move  " : "",
-	         (n_picks > 0 || done_today > 0) ? "[Esc] back  " : "");
-	draw_keys(keys, rows, left, width);
-
-	write_all(frame, frame_len);
+	draw_keys((n_picks > 0 || done_today > 0) ? "[Esc] back  [?] more" : "[?] more",
+	          rows, left, width);
 }
 
 void draw_note_screen(void) {
 	int rows, cols;
 	if (begin_frame(&rows, &cols) == -1) {
-		write_all(frame, frame_len);
 		return;
 	}
 	int left = 3;
@@ -1143,7 +1136,6 @@ void draw_note_screen(void) {
 
 	int index = find_entry(picks[current]);
 	if (index == -1) {
-		write_all(frame, frame_len);
 		return;
 	}
 	Entry *e = &entries[index];
@@ -1173,16 +1165,13 @@ void draw_note_screen(void) {
 	if (status[0] != '\0') {
 		draw_styled("\x1b[2m", status, rows - 2, left, width, 1);
 	}
-	draw_keys("[d]one  [s]kip  [p]ark  [f]ocus  [l]ist  [r]efresh  [q]uit", rows, left, width);
-
-	write_all(frame, frame_len);
+	draw_keys("[d]one  [f]ocus  [?] more", rows, left, width);
 }
 
 // Shown when every pick is done or parked.
 void draw_done_screen(void) {
 	int rows, cols;
 	if (begin_frame(&rows, &cols) == -1) {
-		write_all(frame, frame_len);
 		return;
 	}
 	int left = 3;
@@ -1195,22 +1184,19 @@ void draw_done_screen(void) {
 	if (status[0] != '\0') {
 		draw_styled("\x1b[2m", status, rows - 2, left, width, 1);
 	}
-	draw_keys("[l]ist  [r]efresh  [h]istory  [q]uit", rows, left, width);
-	write_all(frame, frame_len);
+	draw_keys("[l]ist  [?] more", rows, left, width);
 }
 
 // Focus mode: only the note and the timer.
 void draw_focus_screen(void) {
 	int rows, cols;
 	if (begin_frame(&rows, &cols) == -1) {
-		write_all(frame, frame_len);
 		return;
 	}
 	int left = 3;
 	int width = cols - 4;
 	int index = find_entry(picks[current]);
 	if (index == -1) {
-		write_all(frame, frame_len);
 		return;
 	}
 	Entry *e = &entries[index];
@@ -1227,10 +1213,9 @@ void draw_focus_screen(void) {
 	int timer_col = (cols - (int)strlen(timer)) / 2 + 1;   // centered
 	draw_styled("\x1b[1m", timer, rows - 3, timer_col, width, 1);
 
-	draw_wrapped(focus_paused ? "[space] resume  [f] stop  [d]one"
-	                          : "[space] pause  [f] stop  [d]one",
-	             rows, left, width, 1);
-	write_all(frame, frame_len);
+	draw_keys(focus_paused ? "[space] resume  [f] stop  [?] more"
+	                       : "[space] pause  [f] stop  [?] more",
+	          rows, left, width);
 }
 
 // ---- What you did (h): reads .atthing/log ------------------------------------
@@ -1505,7 +1490,6 @@ int history_lines(int draw, int top, int rows, int left, int width) {
 void draw_history_screen(void) {
 	int rows, cols;
 	if (begin_frame(&rows, &cols) == -1) {
-		write_all(frame, frame_len);
 		return;
 	}
 	int left = 3;
@@ -1541,9 +1525,7 @@ void draw_history_screen(void) {
 		draw_wrapped("nothing logged yet", top, left, width, 1);
 	}
 
-	draw_keys(total > rows_for_days ? "[j/k] scroll  [Esc] back  [q]uit" : "[Esc] back  [q]uit",
-	          rows, left, width);
-	write_all(frame, frame_len);
+	draw_keys("[Esc] back", rows, left, width);
 }
 
 // ---- Projects (P): reads Projects.md ------------------------------------------
@@ -1732,7 +1714,6 @@ int projects_lines(int draw, int top, int rows, int left, int width) {
 void draw_projects_screen(void) {
 	int rows, cols;
 	if (begin_frame(&rows, &cols) == -1) {
-		write_all(frame, frame_len);
 		return;
 	}
 	int left = 3;
@@ -1755,10 +1736,139 @@ void draw_projects_screen(void) {
 		draw_styled("\x1b[2m", "- an idea", top + 6, left + 2, width - 2, 1);
 	}
 
-	draw_keys(total > rows_for_projects ? "[j/k] scroll  [Esc] back" : "[Esc] back", rows, left, width);
-	write_all(frame, frame_len);
+	draw_keys("[Esc] back", rows, left, width);
 }
 
+// ---- The ? box: every key for the screen you're on -------------------------------
+
+typedef struct {
+	const char *key;
+	const char *what;
+} KeyHelp;
+
+// One list per screen. { NULL, NULL } marks the end.
+const KeyHelp keys_pick[] = {
+	{ "0-9, Enter", "pick up to 3" },
+	{ "j/k, arrows", "up and down" },
+	{ "J/K", "move a note" },
+	{ "t", "show or hide TRY" },
+	{ "r", "refresh" },
+	{ "h", "what you did" },
+	{ "P", "projects" },
+	{ "Esc", "back" },
+	{ "q", "quit" },
+	{ NULL, NULL }
+};
+const KeyHelp keys_note[] = {
+	{ "d", "done" },
+	{ "s", "next pick" },
+	{ "p", "park" },
+	{ "f", "focus" },
+	{ "l", "list" },
+	{ "r", "refresh" },
+	{ "h", "what you did" },
+	{ "j/k, arrows", "scroll" },
+	{ "q", "quit" },
+	{ NULL, NULL }
+};
+const KeyHelp keys_focus[] = {
+	{ "space", "pause or resume" },
+	{ "f", "stop" },
+	{ "d", "stop, and done" },
+	{ "j/k, arrows", "scroll" },
+	{ "q", "stop, and quit" },
+	{ NULL, NULL }
+};
+const KeyHelp keys_done[] = {
+	{ "l", "list" },
+	{ "r", "refresh" },
+	{ "h", "what you did" },
+	{ "P", "projects" },
+	{ "q", "quit" },
+	{ NULL, NULL }
+};
+const KeyHelp keys_history[] = {
+	{ "j/k, arrows", "scroll" },
+	{ "Esc or h", "back" },
+	{ "q", "quit" },
+	{ NULL, NULL }
+};
+const KeyHelp keys_projects[] = {
+	{ "j/k, arrows", "scroll" },
+	{ "Esc or P", "back" },
+	{ "q", "quit" },
+	{ NULL, NULL }
+};
+
+int show_keys = 0;   // 1 while the ? box is open
+
+const KeyHelp *keys_for_view(void) {
+	if (view == VIEW_PICK) return keys_pick;
+	if (view == VIEW_NOTE) return keys_note;
+	if (view == VIEW_FOCUS) return keys_focus;
+	if (view == VIEW_HISTORY) return keys_history;
+	if (view == VIEW_PROJECTS) return keys_projects;
+	return keys_done;
+}
+
+// Draws the ? box in the middle of the screen, over what's there:
+//   ┌──────────────────────┐
+//   │                      │
+//   │  d        done       │
+//   │  f        focus      │
+//   │                      │
+//   │  any key closes this │
+//   │                      │
+//   └──────────────────────┘
+void draw_key_box(const KeyHelp *keys) {
+	int rows, cols;
+	get_screen_size(&rows, &cols);
+	const char *closes = "any key closes this";
+
+	int n = 0, key_w = 0, what_w = 0;
+	for (n = 0; keys[n].key != NULL; n++) {
+		if ((int)strlen(keys[n].key) > key_w) key_w = (int)strlen(keys[n].key);
+		if ((int)strlen(keys[n].what) > what_w) what_w = (int)strlen(keys[n].what);
+	}
+	int inner = 2 + key_w + 3 + what_w + 2;   // space, key, gap, meaning, space
+	if (inner < (int)strlen(closes) + 4) inner = (int)strlen(closes) + 4;
+	int w = inner + 2;   // plus the border on both sides
+	int h = n + 6;       // border, blank, keys, blank, "any key...", blank, border
+
+	if (w > cols || h > rows) {   // no room for a box: list the keys on a clean screen
+		frame_len = 0;
+		frame_str("\x1b[H\x1b[2J");
+		for (int i = 0; i < n && i < rows; i++) {
+			draw_wrapped(keys[i].key, i + 1, 1, key_w, 1);
+			draw_wrapped(keys[i].what, i + 1, key_w + 3, cols - key_w - 2, 1);
+		}
+		return;
+	}
+	int top = (rows - h) / 2 + 1;
+	int left = (cols - w) / 2 + 1;
+
+	// the border, and spaces inside it so the screen behind doesn't show through
+	char line[1024];
+	for (int r = 0; r < h; r++) {
+		const char *l = "│", *mid = " ", *rt = "│";
+		if (r == 0)     { l = "┌"; mid = "─"; rt = "┐"; }
+		if (r == h - 1) { l = "└"; mid = "─"; rt = "┘"; }
+		snprintf(line, sizeof line, "%s", l);
+		for (int i = 0; i < inner; i++) {
+			strncat(line, mid, sizeof line - strlen(line) - 1);
+		}
+		strncat(line, rt, sizeof line - strlen(line) - 1);
+		frame_goto(top + r, left);
+		frame_str(line);
+	}
+	for (int i = 0; i < n; i++) {
+		draw_styled("\x1b[1m", keys[i].key, top + 2 + i, left + 3, key_w, 1);
+		draw_wrapped(keys[i].what, top + 2 + i, left + 3 + key_w + 3, what_w, 1);
+	}
+	draw_styled("\x1b[2m", closes, top + h - 3, left + 3, inner - 2, 1);
+}
+
+// Builds the screen for the current view, then writes it all at once.
 void draw_screen(void) {
 	if (view == VIEW_PICK) {
 		draw_pick_screen();
@@ -1773,6 +1883,10 @@ void draw_screen(void) {
 	} else {
 		draw_done_screen();
 	}
+	if (show_keys) {
+		draw_key_box(keys_for_view());
+	}
+	write_all(frame, frame_len);
 }
 
 // Reads "1 4 6" from the pick screen and makes those today's picks.
@@ -2212,8 +2326,12 @@ int run_screen(int force_pick) {
 			continue;   // no key within 0.1 seconds; check the size again
 		}
 
-		int quit;
-		if (view == VIEW_PICK) {
+		int quit = 0;
+		if (show_keys) {
+			show_keys = 0;   // any key closes the ? box, and does nothing else
+		} else if (key == '?') {
+			show_keys = 1;
+		} else if (view == VIEW_PICK) {
 			quit = pick_key(key);
 		} else if (view == VIEW_NOTE) {
 			quit = note_key(key);
@@ -2247,7 +2365,7 @@ void print_usage(FILE *out) {
 		"notes folder: $ATTHING_DIR, or ~/Life/forgetme if it isn't set.\n"
 		"it needs now/ and try/ inside. atthing keeps its memory in .atthing/ there.\n"
 		"\n"
-		"keys:\n"
+		"keys (? on any screen shows them):\n"
 		"  picking   type numbers + Enter, Esc back, q quit\n"
 		"            j/k or arrows go up/down, J/K or Shift+arrows move a note\n"
 		"            t shows or hides TRY, r refresh, h history, P projects\n"
