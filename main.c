@@ -304,7 +304,10 @@ int is_picked(int index) {
 
 // ---- The order you set (.atthing/order) --------------------------------------
 // One note per line, "now/cubesat.md", top of the list first. Written when you
-// move a note with J/K. Notes that aren't in it yet go to the bottom of their group.
+// move a note with J/K, and when a new note shows up. Notes that aren't in it
+// yet go to the bottom of their group (the very first time: all of them, A to Z).
+
+int order_changed = 0;   // a note isn't in the file yet; reload() saves it
 
 void load_order(void) {
 	for (int i = 0; i < n_entries; i++) {
@@ -313,19 +316,23 @@ void load_order(void) {
 	char path[1024], line[600];
 	snprintf(path, sizeof path, "%s/order", state_dir);
 	FILE *f = fopen(path, "r");
-	if (f == NULL) {
-		return;   // nothing moved yet: the list stays alphabetical
-	}
-	int rank = 0;
-	while (fgets(line, sizeof line, f) != NULL) {
-		line[strcspn(line, "\r\n")] = '\0';
-		int index = find_entry(line);
-		if (index != -1 && entries[index].rank == INT_MAX) {
-			entries[index].rank = rank;
+	if (f != NULL) {
+		int rank = 0;
+		while (fgets(line, sizeof line, f) != NULL) {
+			line[strcspn(line, "\r\n")] = '\0';
+			int index = find_entry(line);
+			if (index != -1 && entries[index].rank == INT_MAX) {
+				entries[index].rank = rank;
+			}
+			rank++;
 		}
-		rank++;
+		fclose(f);
 	}
-	fclose(f);
+	for (int i = 0; i < n_entries; i++) {
+		if (entries[i].rank == INT_MAX) {
+			order_changed = 1;
+		}
+	}
 }
 
 void save_order(void) {
@@ -485,6 +492,10 @@ void reload(void) {
 	}
 	if (seen_changed) {
 		save_seen();
+	}
+	if (order_changed) {
+		save_order();   // new notes keep their place at the bottom from now on
+		order_changed = 0;
 	}
 	load_today();
 	prune_picks();
