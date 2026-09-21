@@ -3,6 +3,7 @@
 
 #include <ctype.h>     // toupper, tolower
 #include <errno.h>     // errno, EAGAIN, EEXIST
+#include <limits.h>    // INT_MAX
 #include <stdio.h>     // printf, snprintf, perror, fopen, fgets
 #include <stdlib.h>    // getenv, atexit, qsort, strtol
 #include <string.h>    // strlen, strcmp, strrchr, strstr, strerror
@@ -27,11 +28,13 @@ typedef struct {
 	char   bucket[16];     // "now" or "try"
 	time_t mtime;          // last modified, in seconds since 1970
 	time_t first_seen;     // the day atthing first saw this note
+	int    rank;           // its place in .atthing/order; INT_MAX if it isn't there yet
 	char   body[MAX_BODY]; // text inside the note, "" if the note is empty
 } Entry;
 
 Entry entries[MAX_ENTRIES];
 int n_entries = 0;
+int n_now = 0;   // how many of the entries are from now/ (they come first)
 
 char base[512];        // the notes folder, e.g. ~/Life/forgetme
 char state_dir[600];   // atthing's own memory: base/.atthing
@@ -299,6 +302,76 @@ int is_picked(int index) {
 	return 0;
 }
 
+// ---- The order you set (.atthing/order) --------------------------------------
+// One note per line, "now/cubesat.md", top of the list first. Written when you
+// move a note with J/K. Notes that aren't in it yet go to the bottom of their group.
+
+void load_order(void) {
+	for (int i = 0; i < n_entries; i++) {
+		entries[i].rank = INT_MAX;   // bigger than any line number: "not in the file"
+	}
+	char path[1024], line[600];
+	snprintf(path, sizeof path, "%s/order", state_dir);
+	FILE *f = fopen(path, "r");
+	if (f == NULL) {
+		return;   // nothing moved yet: the list stays alphabetical
+	}
+	int rank = 0;
+	while (fgets(line, sizeof line, f) != NULL) {
+		line[strcspn(line, "\r\n")] = '\0';
+		int index = find_entry(line);
+		if (index != -1 && entries[index].rank == INT_MAX) {
+			entries[index].rank = rank;
+		}
+		rank++;
+	}
+	fclose(f);
+}
+
+void save_order(void) {
+	char path[1024], tmp[1100];
+	snprintf(path, sizeof path, "%s/order", state_dir);
+	FILE *f = start_write(path, tmp, sizeof tmp);
+	if (f == NULL) {
+		return;
+	}
+	for (int i = 0; i < n_entries; i++) {
+		fprintf(f, "%s/%s\n", entries[i].bucket, entries[i].name);
+	}
+	finish_write(f, tmp, path);
+}
+
+// ---- Is TRY open on the list? (.atthing/try-group) ---------------------------
+// "open" or "folded". Folded unless you opened it; it stays how you left it.
+
+int try_open = 0;
+
+void load_try_open(void) {
+	char path[1024], word[16] = "";
+	snprintf(path, sizeof path, "%s/try-group", state_dir);
+	FILE *f = fopen(path, "r");
+	if (f == NULL) {
+		try_open = 0;
+		return;
+	}
+	if (fgets(word, sizeof word, f) == NULL) {
+		word[0] = '\0';
+	}
+	fclose(f);
+	try_open = strncmp(word, "open", 4) == 0;
+}
+
+void save_try_open(void) {
+	char path[1024], tmp[1100];
+	snprintf(path, sizeof path, "%s/try-group", state_dir);
+	FILE *f = start_write(path, tmp, sizeof tmp);
+	if (f == NULL) {
+		return;
+	}
+	fprintf(f, "%s\n", try_open ? "open" : "folded");
+	finish_write(f, tmp, path);
+}
+
 // ---- Finding notes --------------------------------------------------------------
 
 // Reads the text inside the file at path into body (at most size - 1 bytes).
@@ -370,14 +443,17 @@ int bucket_scan(const char *bucket) {
 	return 0;
 }
 
-// Sort order: "now" before "try" (alphabetical works for those two), then by
-// title, ignoring upper/lower case.
+// Sort order: "now" before "try" (alphabetical works for those two), then the
+// order you set, then by title, ignoring upper/lower case.
 int compare_entries(const void *a, const void *b) {
 	const Entry *x = a;
 	const Entry *y = b;
 	int by_bucket = strcmp(x->bucket, y->bucket);
 	if (by_bucket != 0) {
 		return by_bucket;
+	}
+	if (x->rank != y->rank) {
+		return x->rank < y->rank ? -1 : 1;
 	}
 	const unsigned char *p = (const unsigned char *)x->title;
 	const unsigned char *q = (const unsigned char *)y->title;
@@ -393,7 +469,9 @@ int scan_notes(void) {
 	n_entries = 0;
 	int found = 0;
 	if (bucket_scan("now") == 0) found++;
+	n_now = n_entries;   // everything so far came from now/
 	if (bucket_scan("try") == 0) found++;
+	load_order();
 	qsort(entries, n_entries, sizeof entries[0], compare_entries);
 	return found;
 }
@@ -502,7 +580,9 @@ enum {
 	KEY_UP,
 	KEY_DOWN,
 	KEY_PAGE_UP,
-	KEY_PAGE_DOWN
+	KEY_PAGE_DOWN,
+	KEY_SHIFT_UP,
+	KEY_SHIFT_DOWN
 };
 
 // Reads one key press. Arrow keys (and the mouse wheel, in most terminals) arrive
@@ -536,15 +616,17 @@ int read_key(void) {
 		return KEY_NONE;   // Alt + a key: not used
 	}
 
-	// ESC [, then maybe numbers and ';', then one final letter or '~'
+	// ESC [, then maybe numbers and ';', then one final letter or '~'.
+	// Shift+Up is ESC [ 1 ; 2 A: the "2" means Shift.
 	char params[16];
 	int n = 0;
 	unsigned char b;
 	while (read(STDIN_FILENO, &b, 1) == 1) {
 		if (b >= 0x40 && b <= 0x7e) {   // the final byte
 			params[n] = '\0';
-			if (b == 'A') return KEY_UP;
-			if (b == 'B') return KEY_DOWN;
+			int shift = strcmp(params, "1;2") == 0;
+			if (b == 'A') return shift ? KEY_SHIFT_UP : KEY_UP;
+			if (b == 'B') return shift ? KEY_SHIFT_DOWN : KEY_DOWN;
 			if (b == '~' && strcmp(params, "5") == 0) return KEY_PAGE_UP;
 			if (b == '~' && strcmp(params, "6") == 0) return KEY_PAGE_DOWN;
 			return KEY_NONE;   // some other special key
@@ -747,7 +829,8 @@ int current = 0;          // which of today's picks is on screen
 char status[256] = "";    // a one-line message, e.g. an error
 char input[64] = "";      // what's typed on the pick screen
 int input_len = 0;
-int scroll = 0;           // first visible line of the pick list
+int cursor = 0;           // which note the > marker is on, on the pick screen
+int scroll = 0;           // first visible line of the pick list (headings count)
 int body_scroll = 0;      // how many rows of the note's text are scrolled away
 
 // The focus timer. Pausing adds the running part to focus_before.
@@ -890,6 +973,55 @@ void draw_body(const Entry *e, int top, int rows, int left, int width, int hint_
 	}
 }
 
+// ---- The pick list ------------------------------------------------------------
+// Line by line: the NOW heading, the NOW notes, a blank line, the TRY heading,
+// and the TRY notes if TRY is open. Headings count as lines when scrolling.
+
+// How many notes the list shows: all of them, or only NOW when TRY is folded.
+// NOW notes come first in entries[], so either way it's entries[0] to [n - 1].
+int visible_notes(void) {
+	return try_open ? n_entries : n_now;
+}
+
+// Keeps the > marker on a note you can see.
+void keep_cursor_in_list(void) {
+	if (cursor >= visible_notes()) cursor = visible_notes() - 1;
+	if (cursor < 0) cursor = 0;
+}
+
+// The line of the TRY heading: after the NOW heading, the NOW notes (or one
+// "nothing in now/" line), and a blank line.
+int try_heading_line(void) {
+	int now_lines = n_now > 0 ? n_now : 1;
+	return 1 + now_lines + 1;
+}
+
+// The line entries[i] is on.
+int list_line(int i) {
+	if (i < n_now) {
+		return 1 + i;
+	}
+	return try_heading_line() + 1 + (i - n_now);
+}
+
+// The screen row for a line of the list, or 0 if it's scrolled out of view.
+int list_row(int line, int top, int rows) {
+	if (line < scroll || line >= scroll + rows) {
+		return 0;
+	}
+	return top + (line - scroll);
+}
+
+// One note: marker, number, * if picked, title.
+void draw_list_note(int i, int row, int left, int width) {
+	char number[12];
+	snprintf(number, sizeof number, "%3d", i + 1);
+	draw_wrapped(i == cursor ? ">" : " ", row, left, 1, 1);
+	draw_wrapped(number, row, left + 2, 3, 1);
+	draw_wrapped(is_picked(i) ? "*" : " ", row, left + 6, 1, 1);
+	draw_wrapped(entries[i].title, row, left + 8, width - 8, 1);
+}
+
 void draw_pick_screen(void) {
 	int rows, cols;
 	if (begin_frame(&rows, &cols) == -1) {
@@ -905,24 +1037,55 @@ void draw_pick_screen(void) {
 
 	int list_top = 4;
 	int list_rows = rows - 4 - list_top;   // leave room for status, input, keys
-	if (n_entries == 0) {
-		draw_wrapped("nothing in now/ or try/", list_top, left, width, 1);
+	int try_line = try_heading_line();
+	int n_lines = try_line + 1 + (try_open ? n_entries - n_now : 0);
+
+	// scroll so the marker is on screen, and the line above it too (it may be a heading)
+	keep_cursor_in_list();
+	if (visible_notes() > 0) {
+		int line = list_line(cursor);
+		if (cursor == visible_notes() - 1) scroll = n_lines - list_rows;   // last note: show what's below it
+		if (line - 1 < scroll) scroll = line - 1;
+		if (line >= scroll + list_rows) scroll = line - list_rows + 1;
 	}
-	if (scroll > n_entries - list_rows) scroll = n_entries - list_rows;
+	if (scroll > n_lines - list_rows) scroll = n_lines - list_rows;
 	if (scroll < 0) scroll = 0;
 
-	for (int i = scroll; i < n_entries && i - scroll < list_rows; i++) {
-		char number[12], bucket[16];
-		snprintf(number, sizeof number, "%3d", i + 1);
-		upper(entries[i].bucket, bucket, sizeof bucket);
-		int row = list_top + (i - scroll);
-		draw_wrapped(number, row, left, 3, 1);
-		draw_styled("\x1b[2m", bucket, row, left + 5, 3, 1);
-		draw_wrapped(is_picked(i) ? "*" : " ", row, left + 9, 1, 1);
-		draw_wrapped(entries[i].title, row, left + 11, width - 11, 1);
+	int row = list_row(0, list_top, list_rows);
+	if (row != 0) {
+		draw_styled("\x1b[2m", "NOW", row, left, width, 1);
 	}
-	if (scroll + list_rows < n_entries) {
-		draw_styled("\x1b[2m", "↓ more", list_top + list_rows, left + 5, width - 5, 1);
+	row = list_row(1, list_top, list_rows);
+	if (row != 0 && n_now == 0) {
+		draw_styled("\x1b[2m", "nothing in now/", row, left + 8, width - 8, 1);
+	}
+	for (int i = 0; i < visible_notes(); i++) {
+		row = list_row(list_line(i), list_top, list_rows);
+		if (row != 0) {
+			draw_list_note(i, row, left, width);
+		}
+	}
+
+	row = list_row(try_line, list_top, list_rows);
+	if (row != 0) {
+		char heading[96];
+		int n_try = n_entries - n_now;
+		int picked = 0;
+		for (int i = n_now; i < n_entries; i++) {
+			picked += is_picked(i);
+		}
+		if (try_open) {
+			snprintf(heading, sizeof heading, "TRY · [t] hide");
+		} else if (picked > 0) {
+			snprintf(heading, sizeof heading, "TRY · %d note%s, %d picked · [t] show",
+			         n_try, n_try == 1 ? "" : "s", picked);
+		} else {
+			snprintf(heading, sizeof heading, "TRY · %d note%s · [t] show", n_try, n_try == 1 ? "" : "s");
+		}
+		draw_styled("\x1b[2m", heading, row, left, width, 1);
+	}
+	if (scroll + list_rows < n_lines) {
+		draw_styled("\x1b[2m", "↓ more", list_top + list_rows, left + 8, width - 8, 1);
 	}
 
 	if (status[0] != '\0') {
@@ -931,9 +1094,9 @@ void draw_pick_screen(void) {
 	char prompt[128];
 	snprintf(prompt, sizeof prompt, "type numbers, then Enter: %s_", input);
 	draw_wrapped(prompt, rows - 2, left, width, 1);
-	char keys[64];
+	char keys[96];
 	snprintf(keys, sizeof keys, "%s%s[q]uit",
-	         n_entries > list_rows ? "[j/k] scroll  " : "",
+	         visible_notes() > 1 ? "[j/k] up/down  [J/K] move  " : "",
 	         (n_picks > 0 || done_today > 0) ? "[Esc] back  " : "");
 	draw_wrapped(keys, rows, left, width, 1);
 
@@ -1109,6 +1272,17 @@ int confirm_picks(void) {
 	return 0;
 }
 
+// Adds "5 " to what's typed on the pick screen.
+void type_number(int number) {
+	char text[16];
+	snprintf(text, sizeof text, "%d ", number);
+	size_t len = strlen(text);
+	if ((size_t)input_len + len < sizeof input) {
+		memcpy(input + input_len, text, len + 1);
+		input_len += (int)len;
+	}
+}
+
 // Opens the pick screen with today's picks already typed in, so they're easy
 // to change: Backspace one away, type another, Enter.
 void open_list(void) {
@@ -1116,17 +1290,70 @@ void open_list(void) {
 	input[0] = '\0';
 	for (int i = 0; i < n_entries; i++) {
 		if (is_picked(i)) {
-			char number[16];
-			snprintf(number, sizeof number, "%d ", i + 1);
-			size_t len = strlen(number);
-			if ((size_t)input_len + len < sizeof input) {
-				memcpy(input + input_len, number, len + 1);
-				input_len += (int)len;
-			}
+			type_number(i + 1);
 		}
 	}
 	scroll = 0;
 	view = VIEW_PICK;
+}
+
+// Typed numbers are places in the list. When the list changes order, they
+// have to follow their notes: remember_typed() notes down which notes they
+// mean, and retype() writes those notes' new numbers.
+char typed[32][300];
+int n_typed = 0;
+int typed_space = 0;   // did the input end with a space?
+
+void remember_typed(void) {
+	n_typed = 0;
+	typed_space = input_len > 0 && input[input_len - 1] == ' ';
+	const char *p = input;
+	while (*p != '\0') {
+		char *end;
+		long number = strtol(p, &end, 10);
+		if (end == p) {
+			p++;
+			continue;
+		}
+		p = end;
+		if (number >= 1 && number <= n_entries && n_typed < 32) {
+			const Entry *e = &entries[number - 1];
+			snprintf(typed[n_typed], sizeof typed[n_typed], "%s/%s", e->bucket, e->name);
+			n_typed++;
+		}
+	}
+}
+
+void retype(void) {
+	input_len = 0;
+	input[0] = '\0';
+	for (int i = 0; i < n_typed; i++) {
+		int index = find_entry(typed[i]);
+		if (index != -1) {
+			type_number(index + 1);
+		}
+	}
+	if (!typed_space && input_len > 0) {
+		input[--input_len] = '\0';   // type_number adds a space; drop it if there wasn't one
+	}
+}
+
+// Moves the note under the marker one place up (step -1) or down (step 1),
+// staying inside its group, and saves the new order.
+void move_in_list(int step) {
+	keep_cursor_in_list();
+	int other = cursor + step;
+	if (other < 0 || other >= visible_notes() ||
+	    strcmp(entries[other].bucket, entries[cursor].bucket) != 0) {
+		return;   // already at the top or bottom of its group
+	}
+	remember_typed();
+	Entry swap = entries[cursor];
+	entries[cursor] = entries[other];
+	entries[other] = swap;
+	cursor = other;   // the marker moves with the note
+	save_order();
+	retype();
 }
 
 // A key on the pick screen. Returns 1 to quit.
@@ -1135,13 +1362,23 @@ int pick_key(int key) {
 	if (key == 'q' || key == 3) {   // 3 is Ctrl-C
 		return 1;
 	} else if (key == 'j' || key == KEY_DOWN) {
-		scroll++;
+		cursor++;   // keep_cursor_in_list() stops it at the ends
 	} else if (key == 'k' || key == KEY_UP) {
-		scroll--;
+		cursor--;
 	} else if (key == KEY_PAGE_DOWN) {
-		scroll += 10;
+		cursor += 10;
 	} else if (key == KEY_PAGE_UP) {
-		scroll -= 10;
+		cursor -= 10;
+	} else if (key == 'J' || key == KEY_SHIFT_DOWN) {
+		move_in_list(1);
+	} else if (key == 'K' || key == KEY_SHIFT_UP) {
+		move_in_list(-1);
+	} else if (key == 't') {
+		try_open = !try_open;
+		save_try_open();
+		if (try_open && n_entries > n_now) {
+			cursor = n_now;   // jump to the first TRY note, so it scrolls into view
+		}
 	} else if (key == KEY_ESC || key == 'l') {
 		input_len = 0;   // back without changing anything
 		input[0] = '\0';
@@ -1264,6 +1501,7 @@ int run_screen(int force_pick) {
 		return 1;
 	}
 	reload();
+	load_try_open();
 	if (force_pick) {
 		view = VIEW_PICK;
 	} else if (n_picks > 0) {
@@ -1338,7 +1576,9 @@ void print_usage(FILE *out) {
 		"it needs now/ and try/ inside. atthing keeps its memory in .atthing/ there.\n"
 		"\n"
 		"keys:\n"
-		"  picking   type numbers + Enter, j/k or arrows scroll, Esc back, q quit\n"
+		"  picking   type numbers + Enter, Esc back, q quit\n"
+		"            j/k or arrows go up/down, J/K or Shift+arrows move a note\n"
+		"            t shows or hides TRY\n"
 		"  a note    d done, s skip, p park, f focus, l list, j/k scroll, q quit\n"
 		"  focus     space pause, f stop, d done, j/k scroll\n");
 }
