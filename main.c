@@ -1122,8 +1122,11 @@ void draw_pick_screen(void) {
 	char prompt[128];
 	snprintf(prompt, sizeof prompt, "type numbers, then Enter: %s_", input);
 	draw_wrapped(prompt, rows - 2, left, width, 1);
-	draw_keys((n_picks > 0 || done_today > 0) ? "[Esc] back  [?] more" : "[?] more",
-	          rows, left, width);
+	char keys[96];
+	snprintf(keys, sizeof keys, "%s%s[?] more",
+	         visible_notes() > 1 ? "[j/k] up/down  [J/K] move  " : "",
+	         (n_picks > 0 || done_today > 0) ? "[Esc] back  " : "");
+	draw_keys(keys, rows, left, width);
 }
 
 void draw_note_screen(void) {
@@ -1780,11 +1783,12 @@ const KeyHelp keys_pick[] = {
 const KeyHelp keys_note[] = {
 	{ "d", "done" },
 	{ "s", "next pick" },
-	{ "p", "park" },
+	{ "p", "park (asks first)" },
 	{ "f", "focus" },
 	{ "l", "list" },
 	{ "r", "refresh" },
 	{ "h", "what you did" },
+	{ "P", "projects" },
 	{ "j/k, arrows", "scroll" },
 	{ "q", "quit" },
 	{ NULL, NULL }
@@ -1835,13 +1839,13 @@ const KeyHelp *keys_for_view(void) {
 //   │  d        done       │
 //   │  f        focus      │
 //   │                      │
-//   │  any key closes this │
+//   │  any key to close    │
 //   │                      │
 //   └──────────────────────┘
 void draw_key_box(const KeyHelp *keys) {
 	int rows, cols;
 	get_screen_size(&rows, &cols);
-	const char *closes = "any key closes this";
+	const char *closes = "any key to close";
 
 	int n = 0, key_w = 0, what_w = 0;
 	for (n = 0; keys[n].key != NULL; n++) {
@@ -2174,9 +2178,18 @@ int scroll_body_key(int key) {
 	return 1;   // draw_body keeps body_scroll in range
 }
 
+int park_asked = 0;   // 1 after the first p: a second p parks, any other key cancels
+
 // A key on the note screen. Returns 1 to quit.
 int note_key(int key) {
 	status[0] = '\0';
+	if (park_asked) {
+		park_asked = 0;
+		if (key == 'p') {
+			finish_pick(1);
+		}
+		return 0;   // any other key only cancels
+	}
 	if (key == 'q' || key == 3) {
 		return 1;
 	} else if (scroll_body_key(key)) {
@@ -2198,7 +2211,10 @@ int note_key(int key) {
 	} else if (key == 'd') {
 		finish_pick(0);
 	} else if (key == 'p') {
-		finish_pick(1);
+		park_asked = 1;   // parking moves a file, so it asks first
+		snprintf(status, sizeof status, "park it? press p again, any other key cancels");
+	} else if (key == 'P') {
+		open_projects();
 	}
 	return 0;
 }
@@ -2387,8 +2403,8 @@ void print_usage(FILE *out) {
 		"  picking   type numbers + Enter, Esc back, q quit\n"
 		"            j/k or arrows go up/down, J/K or Shift+arrows move a note\n"
 		"            t shows or hides TRY, r refresh, h history, P projects\n"
-		"  a note    d done, s skip, p park, f focus, l list, r refresh\n"
-		"            h history, j/k scroll, q quit\n"
+		"  a note    d done, s skip, p park (asks first), f focus, l list\n"
+		"            r refresh, h history, P projects, j/k scroll, q quit\n"
 		"  focus     space pause, f stop, d done, j/k scroll\n"
 		"            in a small window it shows only the timer\n"
 		"  history   what you did, newest day first: j/k scroll, Esc or h back\n"
