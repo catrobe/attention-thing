@@ -852,7 +852,7 @@ void upper(const char *in, char *out, size_t size) {
 
 // ---- Screens ------------------------------------------------------------------------
 
-enum { VIEW_PICK, VIEW_NOTE, VIEW_DONE, VIEW_FOCUS, VIEW_HISTORY } view;
+enum { VIEW_PICK, VIEW_NOTE, VIEW_DONE, VIEW_FOCUS, VIEW_HISTORY, VIEW_PROJECTS } view;
 
 int current = 0;          // which of today's picks is on screen
 char status[256] = "";    // a one-line message, e.g. an error
@@ -1435,18 +1435,23 @@ void day_heading(int start, int end, char *out, size_t size) {
 	}
 }
 
+// "now/cubesat.md" -> "cubesat": the note's title, as the log has it.
+void note_title(const char *note, char *out, size_t size) {
+	const char *slash = strrchr(note, '/');
+	snprintf(out, size, "%s", slash != NULL ? slash + 1 : note);
+	char *dot = strrchr(out, '.');
+	if (dot != NULL) {
+		*dot = '\0';   // cut off ".md" / ".txt"
+	}
+}
+
 // One note's line: "done    call the dentist        25m". Picked-only lines are grey.
 void draw_day_note(const DayNote *d, int row, int left, int width) {
 	const char *labels[] = { "done", "parked", "picked" };
 	int kind = note_kind(d);
 
 	char title[300];
-	const char *slash = strrchr(d->note, '/');
-	snprintf(title, sizeof title, "%s", slash != NULL ? slash + 1 : d->note);
-	char *dot = strrchr(title, '.');
-	if (dot != NULL) {
-		*dot = '\0';   // cut off ".md" / ".txt"
-	}
+	note_title(d->note, title, sizeof title);
 
 	char time_spent[16] = "";
 	if (d->focus > 0) {
@@ -1541,6 +1546,219 @@ void draw_history_screen(void) {
 	write_all(frame, frame_len);
 }
 
+// ---- Projects (P): reads Projects.md ------------------------------------------
+// A file in the notes folder, next to Parked.md:
+//   # Garden                     a project
+//   before winter, if possible   anything else is ignored
+//   - [[water the plants]]       a note that belongs to it
+//   - build a small greenhouse   an idea, not started yet
+// The screen shows each project, its focus time this week, and what's under it.
+
+#define MAX_PROJECTS 32
+#define MAX_ITEMS    256   // lines under all the projects together
+
+typedef struct {
+	char name[128];
+	long focus;   // seconds of focus this week, on its notes
+} Project;
+
+// What a line under a project is, right now.
+enum { ITEM_ACTIVE, ITEM_GREY, ITEM_DONE };
+
+typedef struct {
+	int  project;     // which projects[] it's under
+	char text[256];   // the note's title, or the idea
+	int  is_note;     // 1 for "- [[note]]", 0 for an idea
+	int  state;       // ITEM_ACTIVE: in now/ or try/; ITEM_DONE: in Done/; ITEM_GREY: anything else
+} Item;
+
+Project projects[MAX_PROJECTS];
+int n_projects = 0;
+Item items[MAX_ITEMS];
+int n_items = 0;
+int projects_file = 0;     // 1 if Projects.md exists
+int projects_scroll = 0;
+int projects_back;         // the screen P came from, to go back to
+
+// Cuts spaces off both ends of s. Returns where the text starts.
+char *trim(char *s) {
+	while (*s == ' ' || *s == '\t') s++;
+	size_t n = strlen(s);
+	while (n > 0 && (s[n - 1] == ' ' || s[n - 1] == '\t')) {
+		s[--n] = '\0';
+	}
+	return s;
+}
+
+// If text has an Obsidian link, writes the note's title into out and returns 1.
+// "[[water the plants]]" -> "water the plants". Also handles "[[folder/note]]",
+// "[[note|shown text]]", "[[note#heading]]" and "[[note.md]]".
+int link_title(const char *text, char *out, size_t size) {
+	const char *open = strstr(text, "[[");
+	if (open == NULL) {
+		return 0;
+	}
+	open += 2;
+	const char *close = strstr(open, "]]");
+	if (close == NULL) {
+		return 0;
+	}
+	snprintf(out, size, "%.*s", (int)(close - open), open);
+	out[strcspn(out, "|#")] = '\0';        // cut "|shown text" or "#heading"
+	char *slash = strrchr(out, '/');
+	if (slash != NULL) {
+		memmove(out, slash + 1, strlen(slash + 1) + 1);   // keep what's after the last /
+	}
+	if (ends_with(out, ".md")) out[strlen(out) - 3] = '\0';
+	if (ends_with(out, ".txt")) out[strlen(out) - 4] = '\0';
+	return 1;
+}
+
+// Is the note with this title in now/ or try/, in Done/, or neither?
+int item_state(const char *title) {
+	for (int i = 0; i < n_entries; i++) {
+		if (strcmp(entries[i].title, title) == 0) {
+			return ITEM_ACTIVE;
+		}
+	}
+	char path[1024];
+	struct stat st;
+	snprintf(path, sizeof path, "%s/Done/%s.md", base, title);
+	if (stat(path, &st) == 0) return ITEM_DONE;
+	snprintf(path, sizeof path, "%s/Done/%s.txt", base, title);
+	if (stat(path, &st) == 0) return ITEM_DONE;
+	return ITEM_GREY;
+}
+
+void load_projects(void) {
+	n_projects = 0;
+	n_items = 0;
+	projects_file = 0;
+	char path[1024], line[1024];
+	snprintf(path, sizeof path, "%s/Projects.md", base);
+	FILE *f = fopen(path, "r");
+	if (f == NULL) {
+		return;
+	}
+	projects_file = 1;
+	while (fgets(line, sizeof line, f) != NULL) {
+		line[strcspn(line, "\r\n")] = '\0';
+		char *p = trim(line);
+		if (p[0] == '#' && p[1] == ' ') {                                   // "# Garden"
+			if (n_projects == MAX_PROJECTS) {
+				break;
+			}
+			Project *pr = &projects[n_projects];
+			n_projects++;
+			snprintf(pr->name, sizeof pr->name, "%s", trim(p + 2));
+			pr->focus = 0;
+		} else if ((p[0] == '-' || p[0] == '*') && p[1] == ' ' && n_projects > 0) {   // "- ..."
+			char *text = trim(p + 2);
+			if (text[0] == '\0' || n_items == MAX_ITEMS) {
+				continue;
+			}
+			Item *it = &items[n_items];
+			n_items++;
+			it->project = n_projects - 1;
+			it->is_note = link_title(text, it->text, sizeof it->text);
+			if (it->is_note) {
+				it->state = item_state(it->text);
+			} else {
+				snprintf(it->text, sizeof it->text, "%s", text);
+				it->state = ITEM_GREY;   // an idea: not started yet
+			}
+		}
+	}
+	fclose(f);
+}
+
+// Adds up this week's focus time for each project, from the log.
+void add_project_times(void) {
+	load_history();
+	char monday[16], title[300];
+	week_start(monday, sizeof monday);
+	for (int i = 0; i < n_history; i++) {
+		if (history[i].focus == 0 || strcmp(history[i].date, monday) < 0) {
+			continue;
+		}
+		note_title(history[i].note, title, sizeof title);
+		int counted[MAX_PROJECTS] = {0};   // a note linked twice in one project counts once
+		for (int j = 0; j < n_items; j++) {
+			int p = items[j].project;
+			if (items[j].is_note && !counted[p] && strcmp(items[j].text, title) == 0) {
+				projects[p].focus += history[i].focus;
+				counted[p] = 1;
+			}
+		}
+	}
+}
+
+// Goes through the projects line by line: a heading, its notes and ideas (not
+// the done ones), a blank line. Draws the lines inside the window when `draw`
+// is 1. Returns how many lines there are in total.
+int projects_lines(int draw, int top, int rows, int left, int width) {
+	int line = 0;
+	for (int p = 0; p < n_projects; p++) {
+		if (draw && line >= projects_scroll && line < projects_scroll + rows) {
+			char heading[200], total[16];
+			if (projects[p].focus > 0) {
+				format_total(projects[p].focus, total, sizeof total);
+			} else {
+				snprintf(total, sizeof total, "nothing yet");
+			}
+			snprintf(heading, sizeof heading, "%s · %s", projects[p].name, total);
+			draw_styled("\x1b[1m", heading, top + line - projects_scroll, left, width, 1);
+		}
+		line++;
+		for (int i = 0; i < n_items; i++) {
+			if (items[i].project != p || items[i].state == ITEM_DONE) {
+				continue;
+			}
+			if (draw && line >= projects_scroll && line < projects_scroll + rows) {
+				int row = top + line - projects_scroll;
+				if (items[i].state == ITEM_GREY) {
+					draw_styled("\x1b[2m", items[i].text, row, left + 2, width - 2, 1);
+				} else {
+					draw_wrapped(items[i].text, row, left + 2, width - 2, 1);
+				}
+			}
+			line++;
+		}
+		line++;   // blank line between projects
+	}
+	return line;
+}
+
+void draw_projects_screen(void) {
+	int rows, cols;
+	if (begin_frame(&rows, &cols) == -1) {
+		write_all(frame, frame_len);
+		return;
+	}
+	int left = 3;
+	int width = cols - 4;
+	draw_styled("\x1b[2m", "PROJECTS · this week", 2, left, width, 1);
+
+	int top = 4;
+	int rows_for_projects = rows - 2 - top;
+	int total = projects_lines(0, top, rows_for_projects, left, width);
+	if (projects_scroll > total - rows_for_projects) projects_scroll = total - rows_for_projects;
+	if (projects_scroll < 0) projects_scroll = 0;
+	projects_lines(1, top, rows_for_projects, left, width);
+
+	if (n_projects == 0) {
+		draw_wrapped(projects_file ? "no projects in Projects.md yet" : "no Projects.md yet",
+		             top, left, width, 1);
+		draw_styled("\x1b[2m", "make one in your notes folder, like this:", top + 2, left, width, 1);
+		draw_styled("\x1b[2m", "# a project", top + 4, left + 2, width - 2, 1);
+		draw_styled("\x1b[2m", "- [[a note]]", top + 5, left + 2, width - 2, 1);
+		draw_styled("\x1b[2m", "- an idea", top + 6, left + 2, width - 2, 1);
+	}
+
+	draw_keys(total > rows_for_projects ? "[j/k] scroll  [Esc] back" : "[Esc] back", rows, left, width);
+	write_all(frame, frame_len);
+}
+
 void draw_screen(void) {
 	if (view == VIEW_PICK) {
 		draw_pick_screen();
@@ -1550,6 +1768,8 @@ void draw_screen(void) {
 		draw_focus_screen();
 	} else if (view == VIEW_HISTORY) {
 		draw_history_screen();
+	} else if (view == VIEW_PROJECTS) {
+		draw_projects_screen();
 	} else {
 		draw_done_screen();
 	}
@@ -1741,6 +1961,15 @@ void open_history(void) {
 	view = VIEW_HISTORY;
 }
 
+// P: opens the projects screen. Reads Projects.md and the log fresh each time.
+void open_projects(void) {
+	projects_back = view;
+	load_projects();
+	add_project_times();
+	projects_scroll = 0;
+	view = VIEW_PROJECTS;
+}
+
 // A key on the pick screen. Returns 1 to quit.
 int pick_key(int key) {
 	status[0] = '\0';
@@ -1768,6 +1997,8 @@ int pick_key(int key) {
 		refresh();
 	} else if (key == 'h') {
 		open_history();
+	} else if (key == 'P') {
+		open_projects();
 	} else if (key == KEY_ESC || key == 'l') {
 		input_len = 0;   // back without changing anything
 		input[0] = '\0';
@@ -1887,6 +2118,8 @@ int done_key(int key) {
 		refresh();
 	} else if (key == 'h') {
 		open_history();
+	} else if (key == 'P') {
+		open_projects();
 	}
 	return 0;
 }
@@ -1906,6 +2139,25 @@ int history_key(int key) {
 		history_scroll += 10;
 	} else if (key == KEY_PAGE_UP) {
 		history_scroll -= 10;
+	}
+	return 0;
+}
+
+// A key on the projects screen. Returns 1 to quit.
+int projects_key(int key) {
+	status[0] = '\0';
+	if (key == 'q' || key == 3) {
+		return 1;
+	} else if (key == KEY_ESC || key == 'P') {
+		view = projects_back;
+	} else if (key == 'j' || key == KEY_DOWN) {
+		projects_scroll++;     // draw_projects_screen keeps it in range
+	} else if (key == 'k' || key == KEY_UP) {
+		projects_scroll--;
+	} else if (key == KEY_PAGE_DOWN) {
+		projects_scroll += 10;
+	} else if (key == KEY_PAGE_UP) {
+		projects_scroll -= 10;
 	}
 	return 0;
 }
@@ -1969,6 +2221,8 @@ int run_screen(int force_pick) {
 			quit = focus_key(key);
 		} else if (view == VIEW_HISTORY) {
 			quit = history_key(key);
+		} else if (view == VIEW_PROJECTS) {
+			quit = projects_key(key);
 		} else {
 			quit = done_key(key);
 		}
@@ -1994,13 +2248,15 @@ void print_usage(FILE *out) {
 		"it needs now/ and try/ inside. atthing keeps its memory in .atthing/ there.\n"
 		"\n"
 		"keys:\n"
-		"  picking   type numbers + Enter, Esc back, r refresh, h history, q quit\n"
+		"  picking   type numbers + Enter, Esc back, q quit\n"
 		"            j/k or arrows go up/down, J/K or Shift+arrows move a note\n"
-		"            t shows or hides TRY\n"
+		"            t shows or hides TRY, r refresh, h history, P projects\n"
 		"  a note    d done, s skip, p park, f focus, l list, r refresh\n"
 		"            h history, j/k scroll, q quit\n"
 		"  focus     space pause, f stop, d done, j/k scroll\n"
-		"  history   what you did, newest day first: j/k scroll, Esc or h back\n");
+		"  history   what you did, newest day first: j/k scroll, Esc or h back\n"
+		"  projects  from Projects.md in the notes folder: # a project,\n"
+		"            - [[a note]], - an idea. j/k scroll, Esc or P back\n");
 }
 
 int main(int argc, char **argv) {
