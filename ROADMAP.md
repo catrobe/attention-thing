@@ -27,7 +27,20 @@ if it closes things, not if it opens more.
 - [x] Arrow keys, Page Up/Down, mouse wheel
 - [x] Scroll long notes
 
+## v0.3: calmer, and a look back (released)
+
+- [x] NOW and TRY groups on the list, TRY folds away
+- [x] Put notes in your own order
+- [x] Refresh when notes change outside the app
+- [x] See what you did, day by day
+- [x] Projects from a `Projects.md` file, with time this week
+- [x] Only the main keys on screen, `?` for all of them
+- [x] Focus shows only the timer in a small window
+- [x] Park asks first
+
 ## Next
+
+- Parked and someday notes come back when their time comes
 
 - Set up the folders automatically in an empty directory
 - Choose the folder without an environment variable
@@ -38,6 +51,7 @@ if it closes things, not if it opens more.
 ## Later
 
 - Its own small window that stays visible on a screen
+- Something that grows while you focus, like a night sky
 - Time estimates written in notes, and learning from how long things really took
 - Split a big task into small steps, with AI help
 - A daily to-do list, separate from the inbox
