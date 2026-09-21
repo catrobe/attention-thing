@@ -304,7 +304,10 @@ int is_picked(int index) {
 
 // ---- The order you set (.atthing/order) --------------------------------------
 // One note per line, "now/cubesat.md", top of the list first. Written when you
-// move a note with J/K. Notes that aren't in it yet go to the bottom of their group.
+// move a note with J/K, and when a new note shows up. Notes that aren't in it
+// yet go to the bottom of their group (the very first time: all of them, A to Z).
+
+int order_changed = 0;   // a note isn't in the file yet; reload() saves it
 
 void load_order(void) {
 	for (int i = 0; i < n_entries; i++) {
@@ -313,19 +316,23 @@ void load_order(void) {
 	char path[1024], line[600];
 	snprintf(path, sizeof path, "%s/order", state_dir);
 	FILE *f = fopen(path, "r");
-	if (f == NULL) {
-		return;   // nothing moved yet: the list stays alphabetical
-	}
-	int rank = 0;
-	while (fgets(line, sizeof line, f) != NULL) {
-		line[strcspn(line, "\r\n")] = '\0';
-		int index = find_entry(line);
-		if (index != -1 && entries[index].rank == INT_MAX) {
-			entries[index].rank = rank;
+	if (f != NULL) {
+		int rank = 0;
+		while (fgets(line, sizeof line, f) != NULL) {
+			line[strcspn(line, "\r\n")] = '\0';
+			int index = find_entry(line);
+			if (index != -1 && entries[index].rank == INT_MAX) {
+				entries[index].rank = rank;
+			}
+			rank++;
 		}
-		rank++;
+		fclose(f);
 	}
-	fclose(f);
+	for (int i = 0; i < n_entries; i++) {
+		if (entries[i].rank == INT_MAX) {
+			order_changed = 1;
+		}
+	}
 }
 
 void save_order(void) {
@@ -485,6 +492,10 @@ void reload(void) {
 	}
 	if (seen_changed) {
 		save_seen();
+	}
+	if (order_changed) {
+		save_order();   // new notes keep their place at the bottom from now on
+		order_changed = 0;
 	}
 	load_today();
 	prune_picks();
@@ -800,6 +811,24 @@ int draw_styled(const char *style, const char *text, int row, int col, int width
 	return used;
 }
 
+// Draws the keys line, e.g. "[d]one  [s]kip  [q]uit". If it's wider than the
+// window, the double spaces become single, so the last key isn't cut off.
+void draw_keys(const char *keys, int row, int col, int width) {
+	char narrow[128];
+	if ((int)strlen(keys) > width) {
+		size_t n = 0;
+		for (const char *p = keys; *p != '\0' && n < sizeof narrow - 1; p++) {
+			if (*p == ' ' && p[1] == ' ') {
+				continue;   // the first of two spaces
+			}
+			narrow[n++] = *p;
+		}
+		narrow[n] = '\0';
+		keys = narrow;
+	}
+	draw_wrapped(keys, row, col, width, 1);
+}
+
 // Starts a new frame. Returns 0 if the screen is big enough to draw on.
 int begin_frame(int *rows, int *cols) {
 	get_screen_size(rows, cols);
@@ -1095,10 +1124,10 @@ void draw_pick_screen(void) {
 	snprintf(prompt, sizeof prompt, "type numbers, then Enter: %s_", input);
 	draw_wrapped(prompt, rows - 2, left, width, 1);
 	char keys[96];
-	snprintf(keys, sizeof keys, "%s%s[q]uit",
+	snprintf(keys, sizeof keys, "%s[r]efresh  %s[q]uit",
 	         visible_notes() > 1 ? "[j/k] up/down  [J/K] move  " : "",
 	         (n_picks > 0 || done_today > 0) ? "[Esc] back  " : "");
-	draw_wrapped(keys, rows, left, width, 1);
+	draw_keys(keys, rows, left, width);
 
 	write_all(frame, frame_len);
 }
@@ -1144,9 +1173,7 @@ void draw_note_screen(void) {
 	if (status[0] != '\0') {
 		draw_styled("\x1b[2m", status, rows - 2, left, width, 1);
 	}
-	draw_wrapped(width >= 47 ? "[d]one  [s]kip  [p]ark  [f]ocus  [l]ist  [q]uit"
-	                         : "[d]one [s]kip [p]ark [f]ocus [l]ist [q]uit",   // narrow window
-	             rows, left, width, 1);
+	draw_keys("[d]one  [s]kip  [p]ark  [f]ocus  [l]ist  [r]efresh  [q]uit", rows, left, width);
 
 	write_all(frame, frame_len);
 }
@@ -1168,7 +1195,7 @@ void draw_done_screen(void) {
 	if (status[0] != '\0') {
 		draw_styled("\x1b[2m", status, rows - 2, left, width, 1);
 	}
-	draw_wrapped("[l]ist  [q]uit", rows, left, width, 1);
+	draw_keys("[l]ist  [r]efresh  [q]uit", rows, left, width);
 	write_all(frame, frame_len);
 }
 
@@ -1356,6 +1383,46 @@ void move_in_list(int step) {
 	retype();
 }
 
+// r: looks at the folders again, for notes that were added, changed, moved or
+// removed since atthing opened. The marker, the typed numbers and the note on
+// screen keep pointing at the same notes, if they're still there.
+void refresh(void) {
+	char marked[300] = "", showing[600] = "";
+	keep_cursor_in_list();
+	if (visible_notes() > 0) {
+		snprintf(marked, sizeof marked, "%s/%s", entries[cursor].bucket, entries[cursor].name);
+	}
+	if (n_picks > 0) {
+		snprintf(showing, sizeof showing, "%s", picks[current]);
+	}
+	remember_typed();
+
+	reload();
+
+	retype();
+	int index = find_entry(marked);
+	if (index != -1) {
+		cursor = index;
+	}
+	int found = 0;
+	for (int i = 0; i < n_picks; i++) {
+		if (strcmp(picks[i], showing) == 0) {
+			current = i;
+			found = 1;
+		}
+	}
+	if (!found) {
+		current = 0;       // the note on screen is gone: show the first pick
+		body_scroll = 0;
+	}
+	if (view == VIEW_NOTE && n_picks == 0) {
+		open_list();       // none of the picks are left
+	} else if (view == VIEW_DONE && n_picks > 0) {
+		view = VIEW_NOTE;  // picked on another device
+	}
+	snprintf(status, sizeof status, "refreshed · %d note%s", n_entries, n_entries == 1 ? "" : "s");
+}
+
 // A key on the pick screen. Returns 1 to quit.
 int pick_key(int key) {
 	status[0] = '\0';
@@ -1379,6 +1446,8 @@ int pick_key(int key) {
 		if (try_open && n_entries > n_now) {
 			cursor = n_now;   // jump to the first TRY note, so it scrolls into view
 		}
+	} else if (key == 'r') {
+		refresh();
 	} else if (key == KEY_ESC || key == 'l') {
 		input_len = 0;   // back without changing anything
 		input[0] = '\0';
@@ -1431,6 +1500,8 @@ int note_key(int key) {
 		// scrolled the note
 	} else if (key == 'l') {
 		open_list();
+	} else if (key == 'r') {
+		refresh();
 	} else if (key == 's') {
 		current = (current + 1) % n_picks;   // after the last pick, back to the first
 		body_scroll = 0;
@@ -1490,6 +1561,8 @@ int done_key(int key) {
 		return 1;
 	} else if (key == 'l' || key == 'n') {
 		open_list();
+	} else if (key == 'r') {
+		refresh();
 	}
 	return 0;
 }
@@ -1576,10 +1649,11 @@ void print_usage(FILE *out) {
 		"it needs now/ and try/ inside. atthing keeps its memory in .atthing/ there.\n"
 		"\n"
 		"keys:\n"
-		"  picking   type numbers + Enter, Esc back, q quit\n"
+		"  picking   type numbers + Enter, Esc back, r refresh, q quit\n"
 		"            j/k or arrows go up/down, J/K or Shift+arrows move a note\n"
 		"            t shows or hides TRY\n"
-		"  a note    d done, s skip, p park, f focus, l list, j/k scroll, q quit\n"
+		"  a note    d done, s skip, p park, f focus, l list, r refresh\n"
+		"            j/k scroll, q quit\n"
 		"  focus     space pause, f stop, d done, j/k scroll\n");
 }
 
