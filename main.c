@@ -1187,9 +1187,27 @@ void draw_done_screen(void) {
 	draw_keys("[l]ist  [?] more", rows, left, width);
 }
 
+// Focus mode in a small window: only the timer, in the middle. Works down to
+// a window one line tall; if it's narrower than the timer, the end is cut off.
+void draw_timer_only(int rows, int cols) {
+	frame_len = 0;
+	frame_str("\x1b[H\x1b[2J");   // cursor to top left, clear the screen
+	focus_shown = focus_seconds();
+	char timer[32];
+	format_duration(focus_shown, timer, sizeof timer);
+	int len = (int)strlen(timer);
+	int col = cols > len ? (cols - len) / 2 + 1 : 1;
+	draw_styled("\x1b[1m", timer, (rows + 1) / 2, col, cols - col + 1, 1);
+}
+
 // Focus mode: only the note and the timer.
 void draw_focus_screen(void) {
 	int rows, cols;
+	get_screen_size(&rows, &cols);
+	if (rows < 10 || cols < 30) {
+		draw_timer_only(rows, cols);   // too small for the note: e.g. a window in a corner
+		return;
+	}
 	if (begin_frame(&rows, &cols) == -1) {
 		return;
 	}
@@ -2372,6 +2390,7 @@ void print_usage(FILE *out) {
 		"  a note    d done, s skip, p park, f focus, l list, r refresh\n"
 		"            h history, j/k scroll, q quit\n"
 		"  focus     space pause, f stop, d done, j/k scroll\n"
+		"            in a small window it shows only the timer\n"
 		"  history   what you did, newest day first: j/k scroll, Esc or h back\n"
 		"  projects  from Projects.md in the notes folder: # a project,\n"
 		"            - [[a note]], - an idea. j/k scroll, Esc or P back\n");
