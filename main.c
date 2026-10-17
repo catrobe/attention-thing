@@ -1369,18 +1369,19 @@ void search_key(int key) {
 	}
 }
 
-// One note: marker, number, * if picked, title (bold if it matches the search).
+// One note: marker, number, * if picked, title. During a search, a match is
+// bold and every other note is grey, so the matches stand out.
 void draw_list_note(int i, int row, int left, int width) {
 	char number[12];
 	snprintf(number, sizeof number, "%3d", i + 1);
-	draw_wrapped(i == cursor ? ">" : " ", row, left, 1, 1);
-	draw_wrapped(number, row, left + 2, 3, 1);
-	draw_wrapped(is_picked(i) ? "*" : " ", row, left + 6, 1, 1);
-	if (matches(i)) {
-		draw_styled("\x1b[1m", entries[i].title, row, left + 8, width - 8, 1);
-	} else {
-		draw_wrapped(entries[i].title, row, left + 8, width - 8, 1);
+	const char *style = "";
+	if (search_len > 0) {
+		style = matches(i) ? "\x1b[1m" : "\x1b[2m";
 	}
+	draw_wrapped(i == cursor ? ">" : " ", row, left, 1, 1);
+	draw_styled(style, number, row, left + 2, 3, 1);
+	draw_styled(style, is_picked(i) ? "*" : " ", row, left + 6, 1, 1);
+	draw_styled(style, entries[i].title, row, left + 8, width - 8, 1);
 }
 
 // A group's heading. NOW is just "NOW". The others: "NEXT" when open,
