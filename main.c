@@ -1239,14 +1239,148 @@ int list_row(int line, int top, int rows) {
 	return top + (line - scroll);
 }
 
-// One note: marker, number, * if picked, title.
+// ---- Search on the list: / like in vim ----------------------------------------
+// / and a few letters: the marker jumps to the first title with them in it,
+// while you type. Enter keeps it there, Esc puts it back. n and N go to the
+// next and the previous match. Matching titles are bold.
+
+char search[64] = "";   // what you searched for; "" when there's no search
+int search_len = 0;
+int searching = 0;      // 1 while you type after /
+int search_from;        // where the marker was before /, for Esc
+int search_was_open;    // were the groups open before /? Also for Esc
+
+// "Şule İzmir" -> "şule izmir": lower case, Turkish capitals too. Letters keep
+// their marks, so ş only finds ş. English and Turkish disagree about I: here
+// it's i, so i finds i, I and İ, and ı finds only ı.
+void fold_case(const char *in, char *out, size_t size) {
+	const unsigned char *p = (const unsigned char *)in;
+	size_t n = 0;
+	while (*p != '\0' && n + 2 < size) {
+		if (p[0] == 0xC4 && p[1] == 0xB0) {                                     // İ -> i
+			out[n++] = 'i';
+			p += 2;
+		} else if (p[0] == 0xC3 && p[1] >= 0x80 && p[1] <= 0x9E && p[1] != 0x97) {   // Ç Ö Ü É... -> ç ö ü é
+			out[n++] = (char)p[0];
+			out[n++] = (char)(p[1] + 0x20);
+			p += 2;
+		} else if ((p[0] == 0xC4 || p[0] == 0xC5) && p[1] == 0x9E) {             // Ğ Ş -> ğ ş
+			out[n++] = (char)p[0];
+			out[n++] = (char)(p[1] + 1);
+			p += 2;
+		} else {
+			out[n++] = (char)tolower(*p);   // A-Z; other bytes stay as they are
+			p++;
+		}
+	}
+	out[n] = '\0';
+}
+
+// Does entries[i]'s title have the search in it?
+int matches(int i) {
+	if (search_len == 0) {
+		return 0;
+	}
+	char title[300], query[200];
+	fold_case(entries[i].title, title, sizeof title);
+	fold_case(search, query, sizeof query);
+	return strstr(title, query) != NULL;
+}
+
+// The first match going `step` (1 down, -1 up) from note `from`, round the end
+// of the list and on from the other end, like vim. With `include`, `from`
+// itself counts. Returns -1 if nothing matches.
+int find_match(int from, int step, int include) {
+	if (n_entries == 0) {
+		return -1;
+	}
+	for (int k = include ? 0 : 1; k <= n_entries; k++) {
+		int i = ((from + step * k) % n_entries + n_entries) % n_entries;   // stays in 0 .. n_entries - 1
+		if (matches(i)) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+// Puts the marker on note i, opening the groups if it's in a folded one.
+// That isn't saved: only t decides how the list opens next time.
+void jump_to(int i) {
+	if (i >= visible_notes()) {
+		groups_open = 1;
+	}
+	cursor = i;
+}
+
+// After each letter you type or take away: start again from where the marker
+// was before /, and jump to the first match from there.
+void search_moved(void) {
+	cursor = search_from;
+	groups_open = search_was_open;
+	int i = find_match(search_from, 1, 1);
+	if (i != -1) {
+		jump_to(i);
+	}
+}
+
+// "/bike · 2 of 3 · n next", or how many there are when the marker isn't on one.
+void search_line(char *out, size_t size) {
+	int total = 0, which = 0;
+	for (int i = 0; i < n_entries; i++) {
+		if (matches(i)) {
+			total++;
+			if (i == cursor) which = total;
+		}
+	}
+	if (total == 0) {
+		snprintf(out, size, "/%s · no match", search);
+	} else if (which > 0) {
+		snprintf(out, size, "/%s · %d of %d%s", search, which, total, total > 1 ? " · n next" : "");
+	} else {
+		snprintf(out, size, "/%s · %d match%s", search, total, total == 1 ? "" : "es");
+	}
+}
+
+// A key while you type after /.
+void search_key(int key) {
+	if (key == KEY_ESC || key == 3) {   // back to where you were, no search
+		cursor = search_from;
+		groups_open = search_was_open;
+		search_len = 0;
+		search[0] = '\0';
+		searching = 0;
+	} else if (key == '\r' || key == '\n') {
+		searching = 0;   // keep it: the marker stays, n and N go on from here
+	} else if (key == 127 || key == 8) {   // Backspace
+		if (search_len == 0) {
+			searching = 0;   // like vim: Backspace on nothing ends the search
+			return;
+		}
+		search_len--;
+		while (search_len > 0 && ((unsigned char)search[search_len] & 0xC0) == 0x80) {
+			search_len--;   // the middle of a letter like ş: take the whole letter away
+		}
+		search[search_len] = '\0';
+		search_moved();
+	} else if (key >= 0x20 && key <= 0xff && key != 127 && search_len < (int)sizeof search - 1) {
+		search[search_len++] = (char)key;   // a letter, or one byte of ş
+		search[search_len] = '\0';
+		search_moved();
+	}
+}
+
+// One note: marker, number, * if picked, title (bold if it matches the search).
 void draw_list_note(int i, int row, int left, int width) {
 	char number[12];
 	snprintf(number, sizeof number, "%3d", i + 1);
 	draw_wrapped(i == cursor ? ">" : " ", row, left, 1, 1);
 	draw_wrapped(number, row, left + 2, 3, 1);
 	draw_wrapped(is_picked(i) ? "*" : " ", row, left + 6, 1, 1);
-	draw_wrapped(entries[i].title, row, left + 8, width - 8, 1);
+	if (matches(i)) {
+		draw_styled("\x1b[1m", entries[i].title, row, left + 8, width - 8, 1);
+	} else {
+		draw_wrapped(entries[i].title, row, left + 8, width - 8, 1);
+	}
 }
 
 // A group's heading. NOW is just "NOW". The others: "NEXT" when open,
@@ -1330,8 +1464,19 @@ void draw_pick_screen(void) {
 		draw_styled("\x1b[2m", "↓ more", list_top + list_rows, left + 8, width - 8, 1);
 	}
 
+	char found[128];
+	search_line(found, sizeof found);
 	if (status[0] != '\0') {
 		draw_styled("\x1b[2m", status, rows - 3, left, width, 1);
+	} else if (search_len > 0) {
+		draw_styled("\x1b[2m", found, rows - 3, left, width, 1);
+	}
+	if (searching) {
+		char typing[80];
+		snprintf(typing, sizeof typing, "/%s_", search);
+		draw_wrapped(typing, rows - 2, left, width, 1);
+		draw_keys("[Enter] keep  [Esc] back", rows, left, width);
+		return;
 	}
 	char prompt[128];
 	snprintf(prompt, sizeof prompt, "type numbers, then Enter: %s_", input);
@@ -1339,7 +1484,7 @@ void draw_pick_screen(void) {
 	char keys[96];
 	snprintf(keys, sizeof keys, "%s%s[?] more",
 	         visible_notes() > 1 ? "[j/k] up/down  [J/K] move  " : "",
-	         (n_picks > 0 || done_today > 0) ? "[Esc] back  " : "");
+	         (n_picks > 0 || done_today > 0 || search_len > 0) ? "[Esc] back  " : "");
 	draw_keys(keys, rows, left, width);
 }
 
@@ -1988,6 +2133,8 @@ const KeyHelp keys_pick[] = {
 	{ "j/k, arrows", "up and down" },
 	{ "J/K", "move up or down" },
 	{ "m", "move to another group" },
+	{ "/", "search, like vim" },
+	{ "n/N", "next or previous match" },
 	{ "t", "show or hide all but NOW" },
 	{ "r", "refresh" },
 	{ "h", "what you did" },
@@ -2199,6 +2346,8 @@ void type_number(int number) {
 void show_list(void) {
 	input_len = 0;
 	input[0] = '\0';
+	search_len = 0;   // a search from last time is over
+	search[0] = '\0';
 	for (int i = 0; i < n_entries; i++) {
 		if (is_picked(i)) {
 			type_number(i + 1);
@@ -2436,6 +2585,10 @@ int pick_key(int key) {
 		}
 		return 0;   // any other key only cancels
 	}
+	if (searching) {
+		search_key(key);   // letters go into the search, even q
+		return 0;
+	}
 	if (key == 'q' || key == 3) {   // 3 is Ctrl-C
 		return 1;
 	} else if (key == 'j' || key == KEY_DOWN) {
@@ -2450,6 +2603,21 @@ int pick_key(int key) {
 		move_in_list(1);
 	} else if (key == 'K' || key == KEY_SHIFT_UP) {
 		move_in_list(-1);
+	} else if (key == '/') {
+		keep_cursor_in_list();
+		search_from = cursor;
+		search_was_open = groups_open;
+		search_len = 0;
+		search[0] = '\0';
+		searching = 1;
+	} else if ((key == 'n' || key == 'N') && search_len > 0) {
+		int i = find_match(cursor, key == 'n' ? 1 : -1, 0);
+		if (i != -1) {
+			jump_to(i);
+		}
+	} else if (key == KEY_ESC && search_len > 0) {
+		search_len = 0;   // Esc clears the search first; the next Esc goes back
+		search[0] = '\0';
 	} else if (key == 'm') {
 		ask_move();
 	} else if (key == 't') {
@@ -2836,7 +3004,7 @@ int run_screen(int force_pick) {
 		int quit = 0;
 		if (show_keys) {
 			show_keys = 0;   // any key closes the ? box, and does nothing else
-		} else if (key == '?') {
+		} else if (key == '?' && !searching) {
 			show_keys = 1;
 		} else if (view == VIEW_PICK) {
 			quit = pick_key(key);
@@ -2879,6 +3047,7 @@ void print_usage(FILE *out) {
 		"  picking   type numbers + Enter, Esc back, q quit\n"
 		"            j/k or arrows go up/down, J/K or Shift+arrows move a note\n"
 		"            m then a number moves it to another group\n"
+		"            / searches the titles like vim: n next, N previous, Esc clears\n"
 		"            t shows or hides all but NOW, r refresh, h history, P projects\n"
 		"  a note    d done, s next pick, p park (asks first), f focus, l list\n"
 		"            r refresh, h history, P projects, j/k scroll, q quit\n"
