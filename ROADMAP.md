@@ -44,8 +44,9 @@ if it closes things, not if it opens more.
 - [x] First run asks where your notes are and makes the folders
 - [x] Settings in a config file, your own group names
 
+- [x] Move a note to another group from the list
+
 - Parked and someday notes come back when their time comes
-- Move a note to another folder from the list
 - Timer that knows the estimate written in a note
 - Basic markdown rendering (bold, bullets, headings)
 - Edit a note inside the app

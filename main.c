@@ -1075,8 +1075,9 @@ void log_action(const char *action, const Entry *e, const char *extra) {
 
 // Moves a note into the folder `to` (inside base), creating the folder if needed.
 // Never overwrites: if the name is taken there, it becomes "name (2).md", "name (3).md"...
+// If `moved` isn't NULL, it gets where the note is now, e.g. "next/cubesat.md".
 // Returns 0 if it worked, -1 if not (errno says why).
-int move_note(const Entry *e, const char *to) {
+int move_note(const Entry *e, const char *to, char *moved, size_t moved_size) {
 	char dir[1024], dest[1400];
 	snprintf(dir, sizeof dir, "%s/%s", base, to);
 	if (ensure_dir(dir) == -1) {
@@ -1094,13 +1095,19 @@ int move_note(const Entry *e, const char *to) {
 		}
 		snprintf(dest, sizeof dest, "%s/%.*s (%d)%s", dir, stem, e->name, i, dot != NULL ? dot : "");
 	}
-	return rename(e->path, dest);
+	if (rename(e->path, dest) == -1) {
+		return -1;
+	}
+	if (moved != NULL) {
+		snprintf(moved, moved_size, "%s/%s", to, strrchr(dest, '/') + 1);
+	}
+	return 0;
 }
 
 // Parks a note: moves it to someday/ and adds "- title (parked 2026-09-10)" to
 // Parked.md. Parked is a status, not a lost note.
 int park_note(const Entry *e) {
-	if (move_note(e, "someday") == -1) {
+	if (move_note(e, "someday", NULL, 0) == -1) {
 		return -1;
 	}
 	char path[1024], date[16];
@@ -1138,7 +1145,7 @@ int finish_pick(int park) {
 	}
 	Entry e = entries[index];   // a copy, because reload() below refills entries[]
 
-	int result = park ? park_note(&e) : move_note(&e, "Done");
+	int result = park ? park_note(&e) : move_note(&e, "Done", NULL, 0);
 	if (result == -1) {
 		snprintf(status, sizeof status, "couldn't move it: %s", strerror(errno));
 		return -1;
@@ -1973,7 +1980,8 @@ typedef struct {
 const KeyHelp keys_pick[] = {
 	{ "0-9, Enter", "pick up to 3" },
 	{ "j/k, arrows", "up and down" },
-	{ "J/K", "move a note" },
+	{ "J/K", "move up or down" },
+	{ "m", "move to another group" },
 	{ "t", "show or hide all but NOW" },
 	{ "r", "refresh" },
 	{ "h", "what you did" },
@@ -2251,6 +2259,76 @@ void move_in_list(int step) {
 	retype();
 }
 
+// m, then a number: moves the note under the marker into another group's
+// folder. Two keys, so it's always a choice you make.
+
+int move_asked = 0;   // 1 after m: a number moves the note, any other key cancels
+
+// The groups the note under the marker can go to: every group but its own.
+// Writes their places in buckets[] into to[] and returns how many there are.
+int move_targets(int to[]) {
+	int n = 0;
+	for (int g = 0; g < n_buckets; g++) {
+		if (g != entries[cursor].group) {
+			to[n++] = g;
+		}
+	}
+	return n;
+}
+
+// m: shows where the note can go, "move to:  [1] next  [2] try".
+void ask_move(void) {
+	keep_cursor_in_list();
+	if (visible_notes() == 0 || n_buckets < 2) {
+		return;
+	}
+	int to[MAX_GROUPS];
+	int n = move_targets(to);
+	char where[160] = "";
+	for (int i = 0; i < n; i++) {
+		size_t len = strlen(where);
+		snprintf(where + len, sizeof where - len, "  [%d] %s", i + 1, buckets[to[i]]);
+	}
+	snprintf(status, sizeof status, "move to:%s · any other key cancels", where);
+	move_asked = 1;
+}
+
+// The number after m. The note goes to the bottom of its new group, because
+// .atthing/order doesn't have it there yet (same as a new note).
+void move_to_group(int choice) {
+	int to[MAX_GROUPS];
+	int n = move_targets(to);
+	if (choice < 1 || choice > n) {
+		return;
+	}
+	const char *group = buckets[to[choice - 1]];
+	Entry e = entries[cursor];   // a copy, because reload() below refills entries[]
+	char was[300], now_at[300];
+	snprintf(was, sizeof was, "%s/%s", e.bucket, e.name);
+	remember_typed();
+	if (move_note(&e, group, now_at, sizeof now_at) == -1) {
+		snprintf(status, sizeof status, "couldn't move it: %s", strerror(errno));
+		return;
+	}
+	log_action("move", &e, now_at);   // "... move   now/cubesat.md  next/cubesat.md"
+
+	// a picked or typed note stays picked or typed in its new place
+	for (int i = 0; i < n_picks; i++) {
+		if (strcmp(picks[i], was) == 0) {
+			snprintf(picks[i], sizeof picks[i], "%s", now_at);
+			save_today();
+		}
+	}
+	for (int i = 0; i < n_typed; i++) {
+		if (strcmp(typed[i], was) == 0) {
+			snprintf(typed[i], sizeof typed[i], "%s", now_at);
+		}
+	}
+	reload();
+	retype();
+	snprintf(status, sizeof status, "moved to %s/", group);
+}
+
 // r: looks at the folders again, for notes that were added, changed, moved or
 // removed since atthing opened. The marker, the typed numbers and the note on
 // screen keep pointing at the same notes, if they're still there.
@@ -2311,6 +2389,13 @@ void open_projects(void) {
 // A key on the pick screen. Returns 1 to quit.
 int pick_key(int key) {
 	status[0] = '\0';
+	if (move_asked) {
+		move_asked = 0;
+		if (key >= '1' && key <= '9') {
+			move_to_group(key - '0');
+		}
+		return 0;   // any other key only cancels
+	}
 	if (key == 'q' || key == 3) {   // 3 is Ctrl-C
 		return 1;
 	} else if (key == 'j' || key == KEY_DOWN) {
@@ -2325,6 +2410,8 @@ int pick_key(int key) {
 		move_in_list(1);
 	} else if (key == 'K' || key == KEY_SHIFT_UP) {
 		move_in_list(-1);
+	} else if (key == 'm') {
+		ask_move();
 	} else if (key == 't') {
 		groups_open = !groups_open;
 		save_groups_open();
@@ -2747,6 +2834,7 @@ void print_usage(FILE *out) {
 		"keys (? on any screen shows them):\n"
 		"  picking   type numbers + Enter, Esc back, q quit\n"
 		"            j/k or arrows go up/down, J/K or Shift+arrows move a note\n"
+		"            m then a number moves it to another group\n"
 		"            t shows or hides all but NOW, r refresh, h history, P projects\n"
 		"  a note    d done, s next pick, p park (asks first), f focus, l list\n"
 		"            r refresh, h history, P projects, j/k scroll, q quit\n"
