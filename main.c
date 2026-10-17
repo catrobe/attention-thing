@@ -1765,6 +1765,9 @@ void draw_history_screen(void) {
 		draw_wrapped("nothing logged yet", top, left, width, 1);
 	}
 
+	if (status[0] != '\0') {
+		draw_styled("\x1b[2m", status, rows - 2, left, width, 1);
+	}
 	draw_keys("[Esc] back", rows, left, width);
 }
 
@@ -1966,6 +1969,9 @@ void draw_projects_screen(void) {
 		draw_styled("\x1b[2m", "- an idea", top + 6, left + 2, width - 2, 1);
 	}
 
+	if (status[0] != '\0') {
+		draw_styled("\x1b[2m", status, rows - 2, left, width, 1);
+	}
 	draw_keys("[Esc] back", rows, left, width);
 }
 
@@ -2021,12 +2027,14 @@ const KeyHelp keys_done[] = {
 };
 const KeyHelp keys_history[] = {
 	{ "j/k, arrows", "scroll" },
+	{ "r", "refresh" },
 	{ "Esc or h", "back" },
 	{ "q", "quit" },
 	{ NULL, NULL }
 };
 const KeyHelp keys_projects[] = {
 	{ "j/k, arrows", "scroll" },
+	{ "r", "refresh" },
 	{ "Esc or P", "back" },
 	{ "q", "quit" },
 	{ NULL, NULL }
@@ -2186,9 +2194,9 @@ void type_number(int number) {
 	}
 }
 
-// Opens the pick screen with today's picks already typed in, so they're easy
+// Shows the pick screen with today's picks already typed in, so they're easy
 // to change: Backspace one away, type another, Enter.
-void open_list(void) {
+void show_list(void) {
 	input_len = 0;
 	input[0] = '\0';
 	for (int i = 0; i < n_entries; i++) {
@@ -2329,10 +2337,10 @@ void move_to_group(int choice) {
 	snprintf(status, sizeof status, "moved to %s/", group);
 }
 
-// r: looks at the folders again, for notes that were added, changed, moved or
+// Looks at the folders again, for notes that were added, changed, moved or
 // removed since atthing opened. The marker, the typed numbers and the note on
 // screen keep pointing at the same notes, if they're still there.
-void refresh(void) {
+void refresh_notes(void) {
 	char marked[300] = "", showing[600] = "";
 	keep_cursor_in_list();
 	if (visible_notes() > 0) {
@@ -2362,11 +2370,43 @@ void refresh(void) {
 		body_scroll = 0;
 	}
 	if (view == VIEW_NOTE && n_picks == 0) {
-		open_list();       // none of the picks are left
+		show_list();       // none of the picks are left
 	} else if (view == VIEW_DONE && n_picks > 0) {
 		view = VIEW_NOTE;  // picked on another device
 	}
-	snprintf(status, sizeof status, "refreshed · %d note%s", n_entries, n_entries == 1 ? "" : "s");
+}
+
+// l: the list, like show_list(), but looks at the folders first, in case
+// notes changed while you were on a note.
+void open_list(void) {
+	view = VIEW_PICK;   // first, so refresh_notes() doesn't open the list a second time
+	refresh_notes();
+	show_list();
+}
+
+// r: refreshes, and says so. On "what you did" and projects it reads the log
+// and Projects.md again too.
+void refresh(void) {
+	refresh_notes();
+	if (view == VIEW_HISTORY) {
+		load_history();
+		snprintf(status, sizeof status, "refreshed");
+	} else if (view == VIEW_PROJECTS) {
+		load_projects();
+		add_project_times();
+		snprintf(status, sizeof status, "refreshed");
+	} else {
+		snprintf(status, sizeof status, "refreshed · %d note%s", n_entries, n_entries == 1 ? "" : "s");
+	}
+}
+
+// Esc on "what you did" or projects: back where you came from. Back on the
+// list, it looks at the folders again, the same way l does.
+void go_back(int back) {
+	view = back;
+	if (view == VIEW_PICK) {
+		refresh_notes();
+	}
 }
 
 // h: opens "what you did". It reads the log fresh each time.
@@ -2567,7 +2607,9 @@ int history_key(int key) {
 	if (key == 'q' || key == 3) {
 		return 1;
 	} else if (key == KEY_ESC || key == 'h') {
-		view = history_back;   // back where you came from
+		go_back(history_back);
+	} else if (key == 'r') {
+		refresh();
 	} else if (key == 'j' || key == KEY_DOWN) {
 		history_scroll++;      // draw_history_screen keeps it in range
 	} else if (key == 'k' || key == KEY_UP) {
@@ -2586,7 +2628,9 @@ int projects_key(int key) {
 	if (key == 'q' || key == 3) {
 		return 1;
 	} else if (key == KEY_ESC || key == 'P') {
-		view = projects_back;
+		go_back(projects_back);
+	} else if (key == 'r') {
+		refresh();
 	} else if (key == 'j' || key == KEY_DOWN) {
 		projects_scroll++;     // draw_projects_screen keeps it in range
 	} else if (key == 'k' || key == KEY_UP) {
@@ -2840,9 +2884,11 @@ void print_usage(FILE *out) {
 		"            r refresh, h history, P projects, j/k scroll, q quit\n"
 		"  focus     space pause, f stop, d done, j/k scroll\n"
 		"            in a small window it shows only the timer\n"
-		"  history   what you did, newest day first: j/k scroll, Esc or h back\n"
+		"  history   what you did, newest day first: j/k scroll, r refresh, Esc or h back\n"
 		"  projects  from Projects.md in the notes folder: # a project,\n"
-		"            - [[a note]], - an idea. j/k scroll, Esc or P back\n");
+		"            - [[a note]], - an idea. j/k scroll, r refresh, Esc or P back\n"
+		"\n"
+		"the list looks at the folders again each time you go back to it.\n");
 }
 
 int main(int argc, char **argv) {
