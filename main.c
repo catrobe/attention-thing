@@ -1623,6 +1623,14 @@ typedef struct {
 
 DayNote history[MAX_HISTORY];
 int n_history = 0;
+
+// The star chart at the top keeps its own totals, one per day for the last
+// 53 weeks, so it stays right even when history[] forgets old days.
+#define CHART_WEEKS 53
+#define CHART_DAYS  (CHART_WEEKS * 7)
+long chart_focus[CHART_DAYS];   // seconds of focus each day; [0] is a Monday 52 weeks ago
+int  chart_done[CHART_DAYS];    // notes done each day
+time_t chart_first;             // noon of that first Monday
 int history_scroll = 0;   // how many lines are scrolled away above
 int history_back;         // the screen h came from, to go back to
 
@@ -1679,10 +1687,21 @@ DayNote *day_note(const char *date, const char *note) {
 	return d;
 }
 
-// Reads one log line into history[]. Skips lines it doesn't understand.
+// The date this week's Monday had, as "2026-09-15".
+void week_start(char *out, size_t size) {
+	char today[16];
+	date_string(time(NULL), today, sizeof today);
+	time_t noon = parse_date(today);
+	struct tm *tm = localtime(&noon);
+	int since_monday = tm != NULL ? (tm->tm_wday + 6) % 7 : 0;   // tm_wday: 0 is Sunday
+	date_string(noon - (time_t)since_monday * 86400, out, size);   // noon, so summer time can't change the day
+}
+
+// Reads one log line into history[] and the chart. Skips lines it doesn't understand.
 void add_log_line(char *line) {
 	line[strcspn(line, "\r\n")] = '\0';
-	if (strlen(line) < 18 || parse_date(line) == (time_t)-1) {
+	time_t noon = parse_date(line);
+	if (strlen(line) < 18 || noon == (time_t)-1) {
 		return;
 	}
 	char date[16];
@@ -1721,10 +1740,21 @@ void add_log_line(char *line) {
 	if (strcmp(action, "done") == 0) d->done = 1;
 	if (strcmp(action, "park") == 0) d->parked = 1;
 	d->focus += focus;
+
+	long day = (long)((difftime(noon, chart_first) + 43200) / 86400);   // round, in case of summer time
+	if (day >= 0 && day < CHART_DAYS) {
+		chart_focus[day] += focus;
+		if (strcmp(action, "done") == 0) chart_done[day]++;
+	}
 }
 
 void load_history(void) {
 	n_history = 0;
+	memset(chart_focus, 0, sizeof chart_focus);
+	memset(chart_done, 0, sizeof chart_done);
+	char monday[16];
+	week_start(monday, sizeof monday);
+	chart_first = parse_date(monday) - (time_t)(CHART_WEEKS - 1) * 7 * 86400;
 	char path[1024], line[1024];
 	snprintf(path, sizeof path, "%s/log", state_dir);
 	FILE *f = fopen(path, "r");
@@ -1735,16 +1765,6 @@ void load_history(void) {
 		add_log_line(line);
 	}
 	fclose(f);
-}
-
-// The date this week's Monday had, as "2026-09-15".
-void week_start(char *out, size_t size) {
-	char today[16];
-	date_string(time(NULL), today, sizeof today);
-	time_t noon = parse_date(today);
-	struct tm *tm = localtime(&noon);
-	int since_monday = tm != NULL ? (tm->tm_wday + 6) % 7 : 0;   // tm_wday: 0 is Sunday
-	date_string(noon - (time_t)since_monday * 86400, out, size);   // noon, so summer time can't change the day
 }
 
 // "TODAY" or "SAT 20 SEP", for a day's heading.
@@ -1839,8 +1859,83 @@ void draw_day_note(const DayNote *d, int row, int left, int width) {
 // Goes through the history line by line, newest day first: the day's heading,
 // its notes, a blank line. Draws the lines that are inside the window when
 // `draw` is 1. Returns how many lines there are in total.
+// ---- The star chart at the top of h ---------------------------------------------
+// One column per week, Monday at the top, as many weeks as fit. A star's size
+// is that day's focus time; it's bright (bold) when something got done.
+
+#define CHART_LINES 11   // months, 7 days, a blank line, the legend, a blank line
+
+// The star for one day: · nothing, ‧ under 25 minutes, ✧ under an hour,
+// ✦ under two, ★ two hours or more. Done without focus: the smallest star.
+const char *chart_star(long focus, int done) {
+	if (focus == 0) return done > 0 ? "‧" : "·";
+	if (focus < 25 * 60) return "‧";
+	if (focus < 3600) return "✧";
+	if (focus < 2 * 3600) return "✦";
+	return "★";
+}
+
+// Draws the chart's lines that are on screen and returns how many lines it
+// takes. It scrolls with the days below it. Nothing logged yet: no chart.
+int chart_lines(int draw, int top, int rows, int left, int width) {
+	int weeks = (width - 3) / 2;   // "M  " on the left, then 2 columns per week
+	if (weeks > CHART_WEEKS) weeks = CHART_WEEKS;
+	if (n_history == 0 || weeks < 1) {
+		return 0;
+	}
+	if (!draw) {
+		return CHART_LINES;
+	}
+	static const char *months[] = { "jan", "feb", "mar", "apr", "may", "jun",
+	                                "jul", "aug", "sep", "oct", "nov", "dec" };
+	char today_date[16];
+	date_string(time(NULL), today_date, sizeof today_date);
+	int today = (int)((difftime(parse_date(today_date), chart_first) + 43200) / 86400);
+	int first = (CHART_WEEKS - weeks) * 7;   // the first day on screen, in chart_focus[]
+
+	for (int line = 0; line < CHART_LINES; line++) {
+		if (line < history_scroll || line >= history_scroll + rows) {
+			continue;   // scrolled out of view
+		}
+		int row = top + line - history_scroll;
+		if (line == 0) {
+			// a month's name over the week its 1st is in, if there's room
+			int free_from = left;
+			for (int w = 0; w < weeks; w++) {
+				for (int d = 0; d < 7; d++) {
+					time_t t = chart_first + (time_t)(first + w * 7 + d) * 86400;
+					struct tm *tm = localtime(&t);
+					int col = left + 3 + w * 2;
+					if (tm != NULL && tm->tm_mday == 1 && col >= free_from && col + 3 <= left + width) {
+						draw_styled("\x1b[2m", months[tm->tm_mon], row, col, 3, 1);
+						free_from = col + 4;
+					}
+				}
+			}
+		} else if (line <= 7) {
+			int d = line - 1;   // 0 is Monday
+			const char *label = d == 0 ? "M" : d == 2 ? "W" : d == 4 ? "F" : "";
+			draw_styled("\x1b[2m", label, row, left, 1, 1);
+			for (int w = 0; w < weeks; w++) {
+				int day = first + w * 7 + d;
+				if (day > today) {
+					continue;   // later this week: nothing yet
+				}
+				const char *style = chart_done[day] > 0 ? "\x1b[1m" : "\x1b[2m";
+				draw_styled(style, chart_star(chart_focus[day], chart_done[day]), row, left + 3 + w * 2, 1, 1);
+			}
+		} else if (line == 9) {
+			draw_styled("\x1b[2m", "focus · ‧ ✧ ✦ ★", row, left + 3, width - 3, 1);
+			if (width >= 3 + 18 + 12) {
+				draw_styled("\x1b[1m", "bright: done", row, left + 3 + 18, width - 3 - 18, 1);
+			}
+		}
+	}
+	return CHART_LINES;
+}
+
 int history_lines(int draw, int top, int rows, int left, int width) {
-	int line = 0;
+	int line = chart_lines(draw, top, rows, left, width);
 	int end = n_history - 1;
 	while (end >= 0) {
 		int start = end;   // find where this day starts
@@ -3053,7 +3148,9 @@ void print_usage(FILE *out) {
 		"            r refresh, h history, P projects, j/k scroll, q quit\n"
 		"  focus     space pause, f stop, d done, j/k scroll\n"
 		"            in a small window it shows only the timer\n"
-		"  history   what you did, newest day first: j/k scroll, r refresh, Esc or h back\n"
+		"  history   what you did: a star chart of the weeks (bigger = more focus,\n"
+		"            bright = something done), then each day, newest first.\n"
+		"            j/k scroll, r refresh, Esc or h back\n"
 		"  projects  from Projects.md in the notes folder: # a project,\n"
 		"            - [[a note]], - an idea. j/k scroll, r refresh, Esc or P back\n"
 		"\n"

@@ -34,7 +34,7 @@ The first time you open it each day, you pick up to 3 notes from `now/`, `next/`
 | `/` | search the titles like vim: the marker jumps while you type, `n` / `N` next and previous match, `Esc` clears |
 | `t` | show or hide everything but `now/` on the list |
 | `r` | look at the folders again, after changing notes somewhere else. Works on history and projects too, and the list does it by itself each time you go back to it |
-| `h` | what you did, day by day |
+| `h` | what you did, day by day, under a star chart of the weeks: a bigger star is more focus time, a bright one is a day you got something done |
 | `P` | projects |
 | `?` | every key for the screen you're on |
 | `q` | quit |

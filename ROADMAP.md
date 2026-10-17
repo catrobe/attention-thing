@@ -47,6 +47,7 @@ if it closes things, not if it opens more.
 - [x] Move a note to another group from the list
 - [x] Refresh on history and projects, and when going back to the list
 - [x] Search the list with `/`, like vim
+- [x] A star chart of the weeks on `h`
 
 - Parked and someday notes come back when their time comes
 - Timer that knows the estimate written in a note
