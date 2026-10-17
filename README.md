@@ -11,6 +11,7 @@ Point it at a folder of text/md notes, split by how big each thing is:
 ```
 your-notes/
 ├── now/        under an hour
+├── next/       after now, less urgent
 ├── try/        experiments
 ├── someday/    can wait forever
 ├── Done/
@@ -18,7 +19,7 @@ your-notes/
 └── Projects.md  optional, see below
 ```
 
-The first time you open it each day, you pick up to 3 notes from `now/` and `try/` by typing their numbers. After that it shows them one at a time.
+The first time you open it each day, you pick up to 3 notes from `now/`, `next/` and `try/` by typing their numbers. After that it shows them one at a time.
 
 | key | what it does |
 |---|---|
@@ -29,7 +30,7 @@ The first time you open it each day, you pick up to 3 notes from `now/` and `try
 | `l` | back to the list, to see it or change what you picked (`Esc` goes back) |
 | `j` `k` / arrows | move on the list, scroll a long note |
 | `J` `K` / Shift+arrows | move a note up or down on the list, to put them in your own order |
-| `t` | show or hide the `try/` notes on the list |
+| `t` | show or hide everything but `now/` on the list |
 | `r` | look at the folders again, after changing notes somewhere else |
 | `h` | what you did, day by day |
 | `P` | projects |
