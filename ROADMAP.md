@@ -45,6 +45,7 @@ if it closes things, not if it opens more.
 - [x] Settings in a config file, your own group names
 
 - [x] Move a note to another group from the list
+- [x] Refresh on history and projects, and when going back to the list
 
 - Parked and someday notes come back when their time comes
 - Timer that knows the estimate written in a note
