@@ -38,13 +38,13 @@ Entry entries[MAX_ENTRIES];
 int n_entries = 0;
 
 // The groups on the list, top first. The first one always shows; the others
-// fold away together with t.
-const char *buckets[MAX_GROUPS] = { "now", "next", "try" };
+// fold away together with t. "groups = ..." in the config changes them.
+char buckets[MAX_GROUPS][16] = { "now", "next", "try" };
 int n_buckets = 3;
 int group_first[MAX_GROUPS];   // where each group's notes start in entries[]
 int group_size[MAX_GROUPS];    // how many notes each group has
 
-char base[512];        // the notes folder, e.g. ~/Life/forgetme
+char base[512];        // the notes folder, e.g. /home/you/notes
 char state_dir[600];   // atthing's own memory: base/.atthing
 
 // ---- Small helpers ------------------------------------------------------------
@@ -78,6 +78,33 @@ int ensure_dir(const char *path) {
 		return 0;
 	}
 	return -1;
+}
+
+// Like ensure_dir, but makes the folders above it too: "/a/b/c" makes /a,
+// then /a/b, then /a/b/c, the ones that aren't there yet.
+int make_dirs(const char *path) {
+	char part[1024];
+	snprintf(part, sizeof part, "%s", path);
+	for (char *p = part + 1; *p != '\0'; p++) {
+		if (*p == '/') {
+			*p = '\0';   // cut the path here for a moment
+			if (ensure_dir(part) == -1) {
+				return -1;
+			}
+			*p = '/';
+		}
+	}
+	return ensure_dir(part);
+}
+
+// Cuts spaces off both ends of s. Returns where the text starts.
+char *trim(char *s) {
+	while (*s == ' ' || *s == '\t') s++;
+	size_t n = strlen(s);
+	while (n > 0 && (s[n - 1] == ' ' || s[n - 1] == '\t')) {
+		s[--n] = '\0';
+	}
+	return s;
 }
 
 // ---- Dates ------------------------------------------------------------------------
@@ -143,6 +170,129 @@ int finish_write(FILE *f, const char *tmp, const char *path) {
 		return -1;
 	}
 	return rename(tmp, path);
+}
+
+// ---- Settings (~/.config/atthing/config) -------------------------------------
+// Plain "key = value" lines. Lines starting with # are notes for people.
+//   dir = ~/notes            the notes folder
+//   groups = now next try    the groups on the list, top first (optional)
+
+char config_path[600] = "";   // where the file is; "" if there's no HOME
+char config_dir[400] = "";    // the dir line as it's written, e.g. "~/notes"
+int config_groups = 0;        // 1 if the file set the groups
+
+// $XDG_CONFIG_HOME/atthing/config, or ~/.config/atthing/config without it.
+void find_config(void) {
+	const char *xdg = getenv("XDG_CONFIG_HOME");
+	const char *home = getenv("HOME");
+	if (xdg != NULL && xdg[0] == '/') {
+		snprintf(config_path, sizeof config_path, "%s/atthing/config", xdg);
+	} else if (home != NULL) {
+		snprintf(config_path, sizeof config_path, "%s/.config/atthing/config", home);
+	}
+}
+
+// "~/notes" -> "/home/you/notes". Anything else stays as it is.
+void expand_home(const char *path, char *out, size_t size) {
+	const char *home = getenv("HOME");
+	if (path[0] == '~' && (path[1] == '/' || path[1] == '\0') && home != NULL) {
+		snprintf(out, size, "%s%s", home, path + 1);
+	} else {
+		snprintf(out, size, "%s", path);
+	}
+}
+
+// "now next try" -> buckets[]. Skips names that can't be a folder inside the
+// notes folder, are too long, or are there twice.
+void set_groups(char *text) {
+	char names[MAX_GROUPS][16];
+	int n = 0;
+	for (char *word = strtok(text, " \t,"); word != NULL && n < MAX_GROUPS; word = strtok(NULL, " \t,")) {
+		int ok = strchr(word, '/') == NULL && word[0] != '.' && strlen(word) < sizeof names[0];
+		for (int i = 0; i < n; i++) {
+			if (strcmp(names[i], word) == 0) ok = 0;
+		}
+		if (ok) {
+			snprintf(names[n], sizeof names[n], "%s", word);
+			n++;
+		}
+	}
+	if (n > 0) {
+		memcpy(buckets, names, n * sizeof names[0]);
+		n_buckets = n;
+		config_groups = 1;
+	}
+}
+
+void load_config(void) {
+	if (config_path[0] == '\0') {
+		return;
+	}
+	FILE *f = fopen(config_path, "r");
+	if (f == NULL) {
+		return;   // no settings yet: the first run asks
+	}
+	char line[1024];
+	while (fgets(line, sizeof line, f) != NULL) {
+		line[strcspn(line, "\r\n")] = '\0';
+		char *p = trim(line);
+		char *equals = strchr(p, '=');
+		if (p[0] == '#' || equals == NULL) {
+			continue;
+		}
+		*equals = '\0';   // split the line into the key and the value
+		char *key = trim(p);
+		char *value = trim(equals + 1);
+		if (strcmp(key, "dir") == 0) {
+			snprintf(config_dir, sizeof config_dir, "%s", value);
+		} else if (strcmp(key, "groups") == 0) {
+			set_groups(value);
+		}
+	}
+	fclose(f);
+}
+
+// Writes the settings with this dir, keeping the groups if the file had them.
+int save_config(const char *dir) {
+	char folder[600], tmp[700];
+	snprintf(folder, sizeof folder, "%s", config_path);
+	char *slash = strrchr(folder, '/');
+	if (slash != NULL) {
+		*slash = '\0';   // the folder the file goes in, ~/.config/atthing
+	}
+	if (make_dirs(folder) == -1) {
+		return -1;
+	}
+	FILE *f = start_write(config_path, tmp, sizeof tmp);
+	if (f == NULL) {
+		return -1;
+	}
+	fprintf(f, "# atthing settings\n");
+	fprintf(f, "dir = %s\n", dir);
+	if (config_groups) {
+		fprintf(f, "groups =");
+		for (int g = 0; g < n_buckets; g++) {
+			fprintf(f, " %s", buckets[g]);
+		}
+		fprintf(f, "\n");
+	} else {
+		fprintf(f, "# groups = now next try\n");
+	}
+	return finish_write(f, tmp, config_path);
+}
+
+// Makes the folders atthing uses inside the notes folder, the ones that aren't
+// there yet: the groups, someday/ and Done/. Never touches anything that's there.
+int make_folders(void) {
+	char path[1024];
+	for (int g = 0; g < n_buckets + 2; g++) {
+		const char *name = (g < n_buckets) ? buckets[g] : (g == n_buckets) ? "someday" : "Done";
+		snprintf(path, sizeof path, "%s/%s", base, name);
+		if (ensure_dir(path) == -1) {
+			return -1;
+		}
+	}
+	return 0;
 }
 
 // ---- First-seen dates (.atthing/seen) ----------------------------------------
@@ -576,6 +726,9 @@ void restore_terminal(void) {
 // Raw mode: every key reaches us immediately (no Enter), and isn't printed.
 // Also switches to the alternate screen, so your shell comes back untouched.
 int enable_raw_mode(void) {
+	if (raw_mode_on) {
+		return 0;   // already on (setup came first): keep the settings saved back then
+	}
 	if (tcgetattr(STDIN_FILENO, &orig_termios) == -1) {
 		return -1;
 	}
@@ -1642,16 +1795,6 @@ int projects_file = 0;     // 1 if Projects.md exists
 int projects_scroll = 0;
 int projects_back;         // the screen P came from, to go back to
 
-// Cuts spaces off both ends of s. Returns where the text starts.
-char *trim(char *s) {
-	while (*s == ' ' || *s == '\t') s++;
-	size_t n = strlen(s);
-	while (n > 0 && (s[n - 1] == ' ' || s[n - 1] == '\t')) {
-		s[--n] = '\0';
-	}
-	return s;
-}
-
 // If text has an Obsidian link, writes the note's title into out and returns 1.
 // "[[water the plants]]" -> "water the plants". Also handles "[[folder/note]]",
 // "[[note|shown text]]", "[[note#heading]]" and "[[note.md]]".
@@ -2369,6 +2512,146 @@ int projects_key(int key) {
 	return 0;
 }
 
+// ---- Setup: where are your notes? ----------------------------------------------
+// Shown the first time, and with "atthing setup". Has its own small loop,
+// because the other screens need the notes folder before they can start.
+
+char setup_input[400] = "~/notes";
+int setup_len = 7;
+
+void draw_setup_screen(void) {
+	int rows, cols;
+	if (begin_frame(&rows, &cols) == 0) {
+		int left = 3;
+		int width = cols - 4;
+		draw_styled("\x1b[2m", "SETUP", 2, left, width, 1);
+		draw_styled("\x1b[1m", "where are your notes?", 4, left, width, 1);
+		char line[sizeof setup_input + 8];
+		snprintf(line, sizeof line, "%s_", setup_input);
+		draw_wrapped(line, 6, left, width, 2);
+
+		char folders[160] = "";
+		for (int g = 0; g < n_buckets; g++) {
+			size_t len = strlen(folders);
+			snprintf(folders + len, sizeof folders - len, "%s/ ", buckets[g]);
+		}
+		char made[256];
+		snprintf(made, sizeof made, "atthing makes the folders that aren't there yet: %ssomeday/ Done/", folders);
+		draw_styled("\x1b[2m", made, 9, left, width, 3);
+		if (getenv("ATTHING_DIR") != NULL) {
+			draw_styled("\x1b[2m", "ATTHING_DIR is set, so it wins over this until you unset it",
+			            13, left, width, 2);
+		}
+		if (status[0] != '\0') {
+			draw_styled("\x1b[2m", status, rows - 2, left, width, 1);
+		}
+		draw_keys("[Enter] ok  [Ctrl-U] clear  [Esc] quit", rows, left, width);
+	}
+	write_all(frame, frame_len);
+}
+
+// Enter on the setup screen: makes the folder and the ones inside it, and
+// saves it in the config. Returns 0 if it worked, -1 with a message in `status` if not.
+int finish_setup(void) {
+	char *typed = trim(setup_input);
+	size_t n = strlen(typed);
+	while (n > 1 && typed[n - 1] == '/') {
+		typed[--n] = '\0';   // "~/notes/" -> "~/notes"
+	}
+	if (typed[0] == '\0') {
+		snprintf(status, sizeof status, "type a folder");
+		return -1;
+	}
+	char saved[512], path[512];
+	if (typed[0] == '/' || typed[0] == '~') {
+		snprintf(saved, sizeof saved, "%s", typed);
+	} else {
+		char here[400];   // "notes": inside the folder atthing was started in
+		if (getcwd(here, sizeof here) == NULL) {
+			snprintf(status, sizeof status, "type the whole path, like ~/notes");
+			return -1;
+		}
+		snprintf(saved, sizeof saved, "%s/%s", here, typed);
+	}
+	expand_home(saved, path, sizeof path);
+
+	struct stat st;
+	if (stat(path, &st) == 0 && !S_ISDIR(st.st_mode)) {
+		snprintf(status, sizeof status, "that's a file, not a folder");
+		return -1;
+	}
+	if (make_dirs(path) == -1) {
+		snprintf(status, sizeof status, "couldn't make it: %s", strerror(errno));
+		return -1;
+	}
+	snprintf(base, sizeof base, "%s", path);
+	if (make_folders() == -1) {
+		snprintf(status, sizeof status, "couldn't make the folders inside: %s", strerror(errno));
+		return -1;
+	}
+	if (config_path[0] == '\0' || save_config(saved) == -1) {
+		snprintf(status, sizeof status, "couldn't save the settings: %s", strerror(errno));
+		return -1;
+	}
+	return 0;
+}
+
+// Returns 0 once the notes folder is set up, 1 to quit.
+int run_setup(void) {
+	if (config_dir[0] != '\0') {
+		snprintf(setup_input, sizeof setup_input, "%s", config_dir);   // "atthing setup": start from the one you have
+		setup_len = (int)strlen(setup_input);
+	}
+	if (enable_raw_mode() == -1) {
+		perror("atthing: can't set up the terminal");
+		return 1;
+	}
+	int last_rows = 0, last_cols = 0;
+	int redraw = 1;
+	for (;;) {
+		int rows, cols;
+		get_screen_size(&rows, &cols);
+		if (rows != last_rows || cols != last_cols) {
+			last_rows = rows;
+			last_cols = cols;
+			redraw = 1;
+		}
+		if (redraw) {
+			draw_setup_screen();
+			redraw = 0;
+		}
+		int key = read_key();
+		if (key == KEY_GONE) {
+			return 1;
+		}
+		if (key == KEY_NONE) {
+			continue;
+		}
+		redraw = 1;
+		status[0] = '\0';
+		if (key == KEY_ESC || key == 3) {   // 3 is Ctrl-C
+			return 1;
+		} else if (key == '\r' || key == '\n') {
+			if (finish_setup() == 0) {
+				return 0;
+			}
+			setup_len = (int)strlen(setup_input);   // finish_setup may have cut spaces or a /
+		} else if (key == 21) {   // Ctrl-U clears it
+			setup_len = 0;
+			setup_input[0] = '\0';
+		} else if ((key == 127 || key == 8) && setup_len > 0) {   // Backspace
+			setup_len--;
+			while (setup_len > 0 && ((unsigned char)setup_input[setup_len] & 0xC0) == 0x80) {
+				setup_len--;   // the middle of a letter like ş: take the whole letter away
+			}
+			setup_input[setup_len] = '\0';
+		} else if (key >= 0x20 && key <= 0xff && key != 127 && setup_len < (int)sizeof setup_input - 1) {
+			setup_input[setup_len++] = (char)key;   // a letter, or one byte of ş
+			setup_input[setup_len] = '\0';
+		}
+	}
+}
+
 // The full-screen loop: draw, wait for a key, react, repeat.
 int run_screen(int force_pick) {
 	if (ensure_dir(state_dir) == -1) {
@@ -2452,17 +2735,20 @@ void print_usage(FILE *out) {
 		"usage:\n"
 		"  atthing            open it (the first time each day you pick up to 3)\n"
 		"  atthing pick       pick again\n"
+		"  atthing setup      choose the notes folder again\n"
 		"  atthing --help     this text\n"
 		"  atthing --version  the version\n"
 		"\n"
-		"notes folder: $ATTHING_DIR, or ~/Life/forgetme if it isn't set.\n"
-		"it reads now/, next/ and try/ inside. atthing keeps its memory in .atthing/ there.\n"
+		"notes folder: the first run asks, and saves it in ~/.config/atthing/config\n"
+		"(dir = ~/notes). $ATTHING_DIR, if it's set, wins over the config.\n"
+		"inside it: now/, next/ and try/ (groups = now next try in the config changes\n"
+		"them), someday/ and Done/. atthing keeps its memory in .atthing/ there.\n"
 		"\n"
 		"keys (? on any screen shows them):\n"
 		"  picking   type numbers + Enter, Esc back, q quit\n"
 		"            j/k or arrows go up/down, J/K or Shift+arrows move a note\n"
 		"            t shows or hides all but NOW, r refresh, h history, P projects\n"
-		"  a note    d done, s skip, p park (asks first), f focus, l list\n"
+		"  a note    d done, s next pick, p park (asks first), f focus, l list\n"
 		"            r refresh, h history, P projects, j/k scroll, q quit\n"
 		"  focus     space pause, f stop, d done, j/k scroll\n"
 		"            in a small window it shows only the timer\n"
@@ -2473,9 +2759,12 @@ void print_usage(FILE *out) {
 
 int main(int argc, char **argv) {
 	int force_pick = 0;
+	int setup = 0;
 	if (argc > 1) {
 		if (strcmp(argv[1], "pick") == 0) {
 			force_pick = 1;   // "atthing pick": choose again
+		} else if (strcmp(argv[1], "setup") == 0) {
+			setup = 1;        // "atthing setup": choose the folder again
 		} else if (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0) {
 			print_usage(stdout);
 			return 0;
@@ -2489,18 +2778,37 @@ int main(int argc, char **argv) {
 		}
 	}
 
+	// Which notes folder: $ATTHING_DIR, then the config, then ask.
+	find_config();
+	load_config();
 	const char *env = getenv("ATTHING_DIR");
-	if (env != NULL) {
-		snprintf(base, sizeof base, "%s", env);
-	} else {
-		const char *home = getenv("HOME");
-		if (home == NULL) {
-			fprintf(stderr, "atthing: HOME is not set\n");
+	int terminal = isatty(STDIN_FILENO) && isatty(STDOUT_FILENO);
+	if (setup || (env == NULL && config_dir[0] == '\0')) {
+		if (!terminal) {
+			fprintf(stderr, "atthing: no notes folder chosen yet. run atthing in a terminal "
+			                "to choose one, or set ATTHING_DIR\n");
 			return 1;
 		}
-		snprintf(base, sizeof base, "%s/Life/forgetme", home);
+		if (run_setup() != 0) {
+			return 0;   // Esc: quit without choosing
+		}
+	} else if (env != NULL) {
+		snprintf(base, sizeof base, "%s", env);
+	} else {
+		expand_home(config_dir, base, sizeof base);
 	}
 	snprintf(state_dir, sizeof state_dir, "%s/.atthing", base);
+
+	struct stat st;
+	if (stat(base, &st) == -1 || !S_ISDIR(st.st_mode)) {
+		if (env != NULL && !setup) {
+			fprintf(stderr, "atthing: ATTHING_DIR is %s, and there's no folder there\n", base);
+		} else {
+			fprintf(stderr, "atthing: there's no folder at %s. atthing setup chooses one\n", base);
+		}
+		return 1;
+	}
+	make_folders();   // the missing ones; if that doesn't work, scan_notes() below says so
 
 	if (scan_notes() == 0) {
 		char folders[128];
@@ -2510,7 +2818,7 @@ int main(int argc, char **argv) {
 	}
 
 	// in a real terminal: the full screen
-	if (isatty(STDIN_FILENO) && isatty(STDOUT_FILENO)) {
+	if (terminal) {
 		return run_screen(force_pick);
 	}
 

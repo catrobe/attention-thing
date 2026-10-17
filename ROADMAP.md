@@ -41,11 +41,11 @@ if it closes things, not if it opens more.
 ## Next
 
 - [x] A NEXT group between NOW and TRY
+- [x] First run asks where your notes are and makes the folders
+- [x] Settings in a config file, your own group names
 
 - Parked and someday notes come back when their time comes
-
-- Set up the folders automatically in an empty directory
-- Choose the folder without an environment variable
+- Move a note to another folder from the list
 - Timer that knows the estimate written in a note
 - Basic markdown rendering (bold, bullets, headings)
 - Edit a note inside the app

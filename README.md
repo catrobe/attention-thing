@@ -48,12 +48,23 @@ Optional. Write a `Projects.md` in your notes folder:
 ```
 Each `#` is a project, `- [[note]]` links a note (an Obsidian link), and any other `- ` line is an idea you haven't started. `P` shows each project with the focus time it got this week.
 
-### Build
+### Setup
 ```
 make
-make install                  # puts it in ~/.local/bin
-ATTHING_DIR=~/notes atthing   # without ATTHING_DIR it looks in ~/Life/forgetme
+make install    # puts it in ~/.local/bin
+atthing
 ```
+The first time, it asks where your notes are (`~/notes` if you just press Enter) and makes the folders above inside it. `atthing setup` asks again.
+
+If the shell says `command not found`, `~/.local/bin` isn't in your PATH: `make install` prints the line to add. Or install it for everyone with `sudo make install PREFIX=/usr/local`.
+
+The answer is saved in `~/.config/atthing/config`, a plain text file:
+```
+dir = ~/notes
+groups = now next try
+```
+`groups` is optional: your own folders for the list, top first. `ATTHING_DIR=~/other atthing` uses another folder just this once.
+
 Plain C, no extra libraries. Linux for now.
 
 ### Early
