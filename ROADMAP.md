@@ -38,16 +38,17 @@ if it closes things, not if it opens more.
 - [x] Focus shows only the timer in a small window
 - [x] Park asks first
 
-## Next
+## v0.4: easier to set up, and easier to find things (released)
 
 - [x] A NEXT group between NOW and TRY
 - [x] First run asks where your notes are and makes the folders
 - [x] Settings in a config file, your own group names
-
 - [x] Move a note to another group from the list
 - [x] Refresh on history and projects, and when going back to the list
 - [x] Search the list with `/`, like vim
 - [x] A star chart of the weeks on `h`
+
+## Next
 
 - Parked and someday notes come back when their time comes
 - Timer that knows the estimate written in a note
