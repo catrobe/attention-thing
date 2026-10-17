@@ -20,12 +20,14 @@
 #define MAX_PICKS   3     // how many notes you pick at a time
 #define MAX_SEEN    1024  // how many first-seen dates we remember
 #define DAILY_GOAL  3     // the "/3" in "done 2/3"
+#define MAX_GROUPS  8     // folders on the list, like now/ next/ try/
 
 typedef struct {
 	char   path[1024];     // full path to the note file
 	char   name[256];      // file name, e.g. "cubesat.md"
 	char   title[256];     // file name without ".md" / ".txt"
-	char   bucket[16];     // "now" or "try"
+	char   bucket[16];     // its folder: "now", "next" or "try"
+	int    group;          // its folder's place in buckets[]: 0 is now
 	time_t mtime;          // last modified, in seconds since 1970
 	time_t first_seen;     // the day atthing first saw this note
 	int    rank;           // its place in .atthing/order; INT_MAX if it isn't there yet
@@ -34,7 +36,13 @@ typedef struct {
 
 Entry entries[MAX_ENTRIES];
 int n_entries = 0;
-int n_now = 0;   // how many of the entries are from now/ (they come first)
+
+// The groups on the list, top first. The first one always shows; the others
+// fold away together with t.
+const char *buckets[MAX_GROUPS] = { "now", "next", "try" };
+int n_buckets = 3;
+int group_first[MAX_GROUPS];   // where each group's notes start in entries[]
+int group_size[MAX_GROUPS];    // how many notes each group has
 
 char base[512];        // the notes folder, e.g. ~/Life/forgetme
 char state_dir[600];   // atthing's own memory: base/.atthing
@@ -348,34 +356,34 @@ void save_order(void) {
 	finish_write(f, tmp, path);
 }
 
-// ---- Is TRY open on the list? (.atthing/try-group) ---------------------------
-// "open" or "folded". Folded unless you opened it; it stays how you left it.
+// ---- Are the groups after NOW open on the list? (.atthing/fold) -------------
+// "open" or "folded". Folded unless you opened them; they stay how you left them.
 
-int try_open = 0;
+int groups_open = 0;
 
-void load_try_open(void) {
+void load_groups_open(void) {
 	char path[1024], word[16] = "";
-	snprintf(path, sizeof path, "%s/try-group", state_dir);
+	snprintf(path, sizeof path, "%s/fold", state_dir);
 	FILE *f = fopen(path, "r");
 	if (f == NULL) {
-		try_open = 0;
+		groups_open = 0;
 		return;
 	}
 	if (fgets(word, sizeof word, f) == NULL) {
 		word[0] = '\0';
 	}
 	fclose(f);
-	try_open = strncmp(word, "open", 4) == 0;
+	groups_open = strncmp(word, "open", 4) == 0;
 }
 
-void save_try_open(void) {
+void save_groups_open(void) {
 	char path[1024], tmp[1100];
-	snprintf(path, sizeof path, "%s/try-group", state_dir);
+	snprintf(path, sizeof path, "%s/fold", state_dir);
 	FILE *f = start_write(path, tmp, sizeof tmp);
 	if (f == NULL) {
 		return;
 	}
-	fprintf(f, "%s\n", try_open ? "open" : "folded");
+	fprintf(f, "%s\n", groups_open ? "open" : "folded");
 	finish_write(f, tmp, path);
 }
 
@@ -402,9 +410,10 @@ void read_body(const char *path, char *body, size_t size) {
 	}
 }
 
-// Adds every note inside base/bucket to entries[].
+// Adds every note inside the folder of group g (base/now, base/next...) to entries[].
 // Returns 0 if the folder could be opened, -1 if not.
-int bucket_scan(const char *bucket) {
+int bucket_scan(int g) {
+	const char *bucket = buckets[g];
 	char dir[600];
 	snprintf(dir, sizeof dir, "%s/%s", base, bucket);
 
@@ -427,6 +436,7 @@ int bucket_scan(const char *bucket) {
 		snprintf(e->path, sizeof e->path, "%s/%s", dir, ent->d_name);
 		snprintf(e->name, sizeof e->name, "%s", ent->d_name);
 		snprintf(e->bucket, sizeof e->bucket, "%s", bucket);
+		e->group = g;
 		read_body(e->path, e->body, sizeof e->body);
 
 		snprintf(e->title, sizeof e->title, "%s", ent->d_name);
@@ -450,14 +460,14 @@ int bucket_scan(const char *bucket) {
 	return 0;
 }
 
-// Sort order: "now" before "try" (alphabetical works for those two), then the
-// order you set, then by title, ignoring upper/lower case.
+// Sort order: by group, in the order of buckets[] (not A to Z: "next" would
+// come before "now"), then the order you set, then by title, ignoring
+// upper/lower case.
 int compare_entries(const void *a, const void *b) {
 	const Entry *x = a;
 	const Entry *y = b;
-	int by_bucket = strcmp(x->bucket, y->bucket);
-	if (by_bucket != 0) {
-		return by_bucket;
+	if (x->group != y->group) {
+		return x->group < y->group ? -1 : 1;
 	}
 	if (x->rank != y->rank) {
 		return x->rank < y->rank ? -1 : 1;
@@ -471,16 +481,30 @@ int compare_entries(const void *a, const void *b) {
 	return tolower(*p) - tolower(*q);
 }
 
-// Finds all notes again. Returns how many of the two folders could be opened.
+// Finds all notes again. Returns how many of the group folders could be opened.
+// A missing folder is fine: that group is just empty.
 int scan_notes(void) {
 	n_entries = 0;
 	int found = 0;
-	if (bucket_scan("now") == 0) found++;
-	n_now = n_entries;   // everything so far came from now/
-	if (bucket_scan("try") == 0) found++;
+	for (int g = 0; g < n_buckets; g++) {
+		group_first[g] = n_entries;
+		if (bucket_scan(g) == 0) found++;
+		group_size[g] = n_entries - group_first[g];
+	}
 	load_order();
+	// sorting keeps each group where it was: it sorts by group first
 	qsort(entries, n_entries, sizeof entries[0], compare_entries);
 	return found;
+}
+
+// "now/, next/ or try/", for messages.
+void bucket_list(char *out, size_t size) {
+	out[0] = '\0';
+	for (int g = 0; g < n_buckets; g++) {
+		const char *between = (g == 0) ? "" : (g == n_buckets - 1) ? " or " : ", ";
+		size_t len = strlen(out);
+		snprintf(out + len, size - len, "%s%s/", between, buckets[g]);
+	}
 }
 
 // Rescans the notes and reloads atthing's memory. Used by the full screen.
@@ -1003,13 +1027,14 @@ void draw_body(const Entry *e, int top, int rows, int left, int width, int hint_
 }
 
 // ---- The pick list ------------------------------------------------------------
-// Line by line: the NOW heading, the NOW notes, a blank line, the TRY heading,
-// and the TRY notes if TRY is open. Headings count as lines when scrolling.
+// Line by line: the NOW heading, the NOW notes, a blank line, then the other
+// groups. Open, each one is a heading, its notes and a blank line. Folded,
+// each one is a single line. Headings count as lines when scrolling.
 
-// How many notes the list shows: all of them, or only NOW when TRY is folded.
-// NOW notes come first in entries[], so either way it's entries[0] to [n - 1].
+// How many notes the list shows: all of them, or only NOW when the rest is
+// folded. NOW notes come first in entries[], so either way it's entries[0] to [n - 1].
 int visible_notes(void) {
-	return try_open ? n_entries : n_now;
+	return groups_open ? n_entries : group_size[0];
 }
 
 // Keeps the > marker on a note you can see.
@@ -1018,19 +1043,32 @@ void keep_cursor_in_list(void) {
 	if (cursor < 0) cursor = 0;
 }
 
-// The line of the TRY heading: after the NOW heading, the NOW notes (or one
-// "nothing in now/" line), and a blank line.
-int try_heading_line(void) {
-	int now_lines = n_now > 0 ? n_now : 1;
-	return 1 + now_lines + 1;
+// How many lines group g takes: its heading, its notes and a blank line. An
+// empty NOW has one "nothing in now/" line; a folded group is just one line.
+int group_lines(int g) {
+	if (g > 0 && !groups_open) {
+		return 1;
+	}
+	int notes = group_size[g];
+	if (g == 0 && notes == 0) {
+		notes = 1;
+	}
+	return 1 + notes + 1;
+}
+
+// The line group g's heading is on. NOW's is line 0.
+int heading_line(int g) {
+	int line = 0;
+	for (int i = 0; i < g; i++) {
+		line += group_lines(i);
+	}
+	return line;
 }
 
 // The line entries[i] is on.
 int list_line(int i) {
-	if (i < n_now) {
-		return 1 + i;
-	}
-	return try_heading_line() + 1 + (i - n_now);
+	int g = entries[i].group;
+	return heading_line(g) + 1 + (i - group_first[g]);
 }
 
 // The screen row for a line of the list, or 0 if it's scrolled out of view.
@@ -1051,6 +1089,35 @@ void draw_list_note(int i, int row, int left, int width) {
 	draw_wrapped(entries[i].title, row, left + 8, width - 8, 1);
 }
 
+// A group's heading. NOW is just "NOW". The others: "NEXT" when open,
+// "NEXT · 4 notes, 1 picked" when folded, "TRY · empty" with no notes.
+// The first one after NOW says what t does.
+void draw_group_heading(int g, int row, int left, int width) {
+	char heading[160], name[16];
+	upper(buckets[g], name, sizeof name);
+	int n = group_size[g];
+	int picked = 0;
+	for (int i = group_first[g]; i < group_first[g] + n; i++) {
+		picked += is_picked(i);
+	}
+	if (g == 0) {
+		snprintf(heading, sizeof heading, "%s", name);
+	} else if (n == 0) {
+		snprintf(heading, sizeof heading, "%s · empty", name);
+	} else if (groups_open) {
+		snprintf(heading, sizeof heading, "%s", name);
+	} else if (picked > 0) {
+		snprintf(heading, sizeof heading, "%s · %d note%s, %d picked", name, n, n == 1 ? "" : "s", picked);
+	} else {
+		snprintf(heading, sizeof heading, "%s · %d note%s", name, n, n == 1 ? "" : "s");
+	}
+	if (g == 1) {
+		size_t len = strlen(heading);
+		snprintf(heading + len, sizeof heading - len, " · [t] %s", groups_open ? "hide" : "show");
+	}
+	draw_styled("\x1b[2m", heading, row, left, width, 1);
+}
+
 void draw_pick_screen(void) {
 	int rows, cols;
 	if (begin_frame(&rows, &cols) == -1) {
@@ -1065,8 +1132,10 @@ void draw_pick_screen(void) {
 
 	int list_top = 4;
 	int list_rows = rows - 4 - list_top;   // leave room for status, input, keys
-	int try_line = try_heading_line();
-	int n_lines = try_line + 1 + (try_open ? n_entries - n_now : 0);
+	int n_lines = heading_line(n_buckets);
+	if (n_buckets == 1 || groups_open) {
+		n_lines--;   // no blank line after the last group
+	}
 
 	// scroll so the marker is on screen, and the line above it too (it may be a heading)
 	keep_cursor_in_list();
@@ -1079,38 +1148,23 @@ void draw_pick_screen(void) {
 	if (scroll > n_lines - list_rows) scroll = n_lines - list_rows;
 	if (scroll < 0) scroll = 0;
 
-	int row = list_row(0, list_top, list_rows);
-	if (row != 0) {
-		draw_styled("\x1b[2m", "NOW", row, left, width, 1);
+	for (int g = 0; g < n_buckets; g++) {
+		int row = list_row(heading_line(g), list_top, list_rows);
+		if (row != 0) {
+			draw_group_heading(g, row, left, width);
+		}
 	}
-	row = list_row(1, list_top, list_rows);
-	if (row != 0 && n_now == 0) {
-		draw_styled("\x1b[2m", "nothing in now/", row, left + 8, width - 8, 1);
+	int row = list_row(1, list_top, list_rows);
+	if (row != 0 && group_size[0] == 0) {
+		char nothing[64];
+		snprintf(nothing, sizeof nothing, "nothing in %s/", buckets[0]);
+		draw_styled("\x1b[2m", nothing, row, left + 8, width - 8, 1);
 	}
 	for (int i = 0; i < visible_notes(); i++) {
 		row = list_row(list_line(i), list_top, list_rows);
 		if (row != 0) {
 			draw_list_note(i, row, left, width);
 		}
-	}
-
-	row = list_row(try_line, list_top, list_rows);
-	if (row != 0) {
-		char heading[96];
-		int n_try = n_entries - n_now;
-		int picked = 0;
-		for (int i = n_now; i < n_entries; i++) {
-			picked += is_picked(i);
-		}
-		if (try_open) {
-			snprintf(heading, sizeof heading, "TRY · [t] hide");
-		} else if (picked > 0) {
-			snprintf(heading, sizeof heading, "TRY · %d note%s, %d picked · [t] show",
-			         n_try, n_try == 1 ? "" : "s", picked);
-		} else {
-			snprintf(heading, sizeof heading, "TRY · %d note%s · [t] show", n_try, n_try == 1 ? "" : "s");
-		}
-		draw_styled("\x1b[2m", heading, row, left, width, 1);
 	}
 	if (scroll + list_rows < n_lines) {
 		draw_styled("\x1b[2m", "↓ more", list_top + list_rows, left + 8, width - 8, 1);
@@ -1182,8 +1236,13 @@ void draw_done_screen(void) {
 	char line[64];
 	snprintf(line, sizeof line, "done %d/%d", done_today, DAILY_GOAL);
 	draw_styled("\x1b[1m", line, 4, left, width, 1);
-	draw_wrapped(n_entries == 0 ? "nothing left in now/ or try/" : "nothing picked right now",
-	             6, left, width, 1);
+	char nothing[160] = "nothing picked right now";
+	if (n_entries == 0) {
+		char folders[128];
+		bucket_list(folders, sizeof folders);
+		snprintf(nothing, sizeof nothing, "nothing left in %s", folders);
+	}
+	draw_wrapped(nothing, 6, left, width, 1);
 	if (status[0] != '\0') {
 		draw_styled("\x1b[2m", status, rows - 2, left, width, 1);
 	}
@@ -1572,7 +1631,7 @@ typedef struct {
 	int  project;     // which projects[] it's under
 	char text[256];   // the note's title, or the idea
 	int  is_note;     // 1 for "- [[note]]", 0 for an idea
-	int  state;       // ITEM_ACTIVE: in now/ or try/; ITEM_DONE: in Done/; ITEM_GREY: anything else
+	int  state;       // ITEM_ACTIVE: in a group (now/, next/...); ITEM_DONE: in Done/; ITEM_GREY: anything else
 } Item;
 
 Project projects[MAX_PROJECTS];
@@ -1617,7 +1676,7 @@ int link_title(const char *text, char *out, size_t size) {
 	return 1;
 }
 
-// Is the note with this title in now/ or try/, in Done/, or neither?
+// Is the note with this title in one of the groups, in Done/, or neither?
 int item_state(const char *title) {
 	for (int i = 0; i < n_entries; i++) {
 		if (strcmp(entries[i].title, title) == 0) {
@@ -1772,7 +1831,7 @@ const KeyHelp keys_pick[] = {
 	{ "0-9, Enter", "pick up to 3" },
 	{ "j/k, arrows", "up and down" },
 	{ "J/K", "move a note" },
-	{ "t", "show or hide TRY" },
+	{ "t", "show or hide all but NOW" },
 	{ "r", "refresh" },
 	{ "h", "what you did" },
 	{ "P", "projects" },
@@ -2124,10 +2183,10 @@ int pick_key(int key) {
 	} else if (key == 'K' || key == KEY_SHIFT_UP) {
 		move_in_list(-1);
 	} else if (key == 't') {
-		try_open = !try_open;
-		save_try_open();
-		if (try_open && n_entries > n_now) {
-			cursor = n_now;   // jump to the first TRY note, so it scrolls into view
+		groups_open = !groups_open;
+		save_groups_open();
+		if (groups_open && n_entries > group_size[0]) {
+			cursor = group_size[0];   // jump to the first note after NOW, so it scrolls into view
 		}
 	} else if (key == 'r') {
 		refresh();
@@ -2317,7 +2376,7 @@ int run_screen(int force_pick) {
 		return 1;
 	}
 	reload();
-	load_try_open();
+	load_groups_open();
 	if (force_pick) {
 		view = VIEW_PICK;
 	} else if (n_picks > 0) {
@@ -2397,12 +2456,12 @@ void print_usage(FILE *out) {
 		"  atthing --version  the version\n"
 		"\n"
 		"notes folder: $ATTHING_DIR, or ~/Life/forgetme if it isn't set.\n"
-		"it needs now/ and try/ inside. atthing keeps its memory in .atthing/ there.\n"
+		"it reads now/, next/ and try/ inside. atthing keeps its memory in .atthing/ there.\n"
 		"\n"
 		"keys (? on any screen shows them):\n"
 		"  picking   type numbers + Enter, Esc back, q quit\n"
 		"            j/k or arrows go up/down, J/K or Shift+arrows move a note\n"
-		"            t shows or hides TRY, r refresh, h history, P projects\n"
+		"            t shows or hides all but NOW, r refresh, h history, P projects\n"
 		"  a note    d done, s skip, p park (asks first), f focus, l list\n"
 		"            r refresh, h history, P projects, j/k scroll, q quit\n"
 		"  focus     space pause, f stop, d done, j/k scroll\n"
@@ -2444,7 +2503,9 @@ int main(int argc, char **argv) {
 	snprintf(state_dir, sizeof state_dir, "%s/.atthing", base);
 
 	if (scan_notes() == 0) {
-		fprintf(stderr, "atthing: no now/ or try/ folder in %s\n", base);
+		char folders[128];
+		bucket_list(folders, sizeof folders);
+		fprintf(stderr, "atthing: no %s folder in %s\n", folders, base);
 		return 1;
 	}
 

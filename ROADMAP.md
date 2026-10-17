@@ -40,6 +40,8 @@ if it closes things, not if it opens more.
 
 ## Next
 
+- [x] A NEXT group between NOW and TRY
+
 - Parked and someday notes come back when their time comes
 
 - Set up the folders automatically in an empty directory
