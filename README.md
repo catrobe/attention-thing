@@ -30,6 +30,8 @@ The first time you open it each day, you pick up to 3 notes from `now/`, `next/`
 | `l` | back to the list, to see it or change what you picked (`Esc` goes back) |
 | `j` `k` / arrows | move on the list, scroll a long note |
 | `J` `K` / Shift+arrows | move a note up or down on the list, to put them in your own order |
+| `a` | add a note: type its title, and it's made in the group the `>` marker is in |
+| `e` | write in a note with your own editor (`$EDITOR`, e.g. nvim); atthing comes back when you close it |
 | `m` then a number | move the note to another group's folder, e.g. from `now/` to `next/` |
 | `/` | search the titles like vim: the marker jumps while you type and the other notes go grey, `n` / `N` next and previous match, `Esc` clears |
 | `t` | show or hide everything but `now/` on the list |
