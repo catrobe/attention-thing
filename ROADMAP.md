@@ -50,6 +50,8 @@ if it closes things, not if it opens more.
 
 ## Next
 
+- [x] Undo with `u`, and fix a focus you forgot to stop
+
 - Parked and someday notes come back when their time comes
 - Timer that knows the estimate written in a note
 - Basic markdown rendering (bold, bullets, headings)

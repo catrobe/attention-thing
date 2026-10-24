@@ -2232,6 +2232,7 @@ const KeyHelp keys_pick[] = {
 	{ "/", "search, like vim" },
 	{ "n/N", "next or previous match" },
 	{ "t", "show or hide all but NOW" },
+	{ "u", "undo (asks first)" },
 	{ "r", "refresh" },
 	{ "h", "what you did" },
 	{ "P", "projects" },
@@ -2245,6 +2246,7 @@ const KeyHelp keys_note[] = {
 	{ "p", "park (asks first)" },
 	{ "f", "focus" },
 	{ "l", "list" },
+	{ "u", "undo (asks first)" },
 	{ "r", "refresh" },
 	{ "h", "what you did" },
 	{ "P", "projects" },
@@ -2262,6 +2264,7 @@ const KeyHelp keys_focus[] = {
 };
 const KeyHelp keys_done[] = {
 	{ "l", "list" },
+	{ "u", "undo (asks first)" },
 	{ "r", "refresh" },
 	{ "h", "what you did" },
 	{ "P", "projects" },
@@ -2654,6 +2657,305 @@ void go_back(int back) {
 	}
 }
 
+// ---- Undo (u), like vim ------------------------------------------------------------
+// u undoes the latest thing in today's log: a done, park, move or pick. It
+// asks first, because it moves a file back. u again goes one step further
+// back. The log line goes away, as if it never happened. On a focus line it
+// asks how many minutes it really was instead.
+
+typedef struct {
+	char action[16];   // "done", "park", "move", "pick" or "focus"
+	char note[300];    // "now/cubesat.md"
+	char extra[300];   // "25:10" for focus, "next/cubesat.md" for move, else ""
+} LogLine;
+
+enum { UNDO_NONE, UNDO_ASKED, UNDO_MINUTES } undo_state = UNDO_NONE;
+int undo_line;             // which line of the log, counted from 0
+LogLine undo_what;         // that line, in parts
+char undo_raw[1024];       // that line, as it is in the file
+char minutes[8] = "";      // typed after u on a focus line
+int minutes_len = 0;
+
+// "2026-09-21 14:22  move   now/a.md  next/a.md" -> action, note, extra.
+// Returns 0 if it's a line undo understands.
+int parse_log_line(const char *line, LogLine *out) {
+	if (strlen(line) < 18) {
+		return -1;
+	}
+	const char *p = line + 16;   // after "2026-09-21 14:22"
+	while (*p == ' ') p++;
+	int n = (int)strcspn(p, " ");
+	if (n == 0 || n >= (int)sizeof out->action) {
+		return -1;
+	}
+	snprintf(out->action, sizeof out->action, "%.*s", n, p);
+	p += n;
+	while (*p == ' ') p++;
+	snprintf(out->note, sizeof out->note, "%s", p);
+	out->extra[0] = '\0';
+
+	char *split = NULL;
+	if (strcmp(out->action, "focus") == 0) {
+		split = strrchr(out->note, ' ');   // the space before "25:10"
+	} else if (strcmp(out->action, "move") == 0) {
+		for (int g = 0; g < n_buckets; g++) {   // "  next/": where the new place starts
+			char find[24];
+			snprintf(find, sizeof find, "  %s/", buckets[g]);
+			char *at = strstr(out->note, find);
+			if (at != NULL && (split == NULL || at > split)) split = at + 1;
+		}
+	} else if (strcmp(out->action, "done") != 0 && strcmp(out->action, "park") != 0 &&
+	           strcmp(out->action, "pick") != 0) {
+		return -1;
+	}
+	if (split != NULL) {
+		snprintf(out->extra, sizeof out->extra, "%s", split + 1);
+		*split = '\0';
+	}
+	char *end = out->note + strlen(out->note);
+	while (end > out->note && end[-1] == ' ') *--end = '\0';   // spaces before the extra
+	if (out->note[0] == '\0' || (split == NULL && out->action[0] != 'd' && out->action[0] != 'p')) {
+		return -1;   // a focus or move line without its last part
+	}
+	return 0;
+}
+
+// Finds the latest line of today's log that undo understands. Returns its
+// number (and fills undo_what and undo_raw), or -1 if there isn't one.
+int find_undo(void) {
+	char path[1024], line[1024], today[16];
+	snprintf(path, sizeof path, "%s/log", state_dir);
+	date_string(time(NULL), today, sizeof today);
+	FILE *f = fopen(path, "r");
+	if (f == NULL) {
+		return -1;
+	}
+	int found = -1;
+	for (int i = 0; fgets(line, sizeof line, f) != NULL; i++) {
+		line[strcspn(line, "\r\n")] = '\0';
+		LogLine parts;
+		if (strncmp(line, today, 10) == 0 && parse_log_line(line, &parts) == 0) {
+			found = i;
+			undo_what = parts;
+			snprintf(undo_raw, sizeof undo_raw, "%s", line);
+		}
+	}
+	fclose(f);
+	return found;
+}
+
+// Writes the log again without line `number`, or with `replacement` in its place.
+int change_log_line(int number, const char *replacement) {
+	char path[1024], tmp[1100], line[1024];
+	snprintf(path, sizeof path, "%s/log", state_dir);
+	FILE *in = fopen(path, "r");
+	if (in == NULL) {
+		return -1;
+	}
+	FILE *out = start_write(path, tmp, sizeof tmp);
+	if (out == NULL) {
+		fclose(in);
+		return -1;
+	}
+	for (int i = 0; fgets(line, sizeof line, in) != NULL; i++) {
+		if (i != number) {
+			fputs(line, out);
+		} else if (replacement != NULL) {
+			fprintf(out, "%s\n", replacement);
+		}
+	}
+	fclose(in);
+	return finish_write(out, tmp, path);
+}
+
+// Takes the last "- title (parked 2026-10-24)" line out of Parked.md.
+void unpark_line(const char *title) {
+	char path[1024], tmp[1100], line[1024], wanted[400], today[16];
+	snprintf(path, sizeof path, "%s/Parked.md", base);
+	date_string(time(NULL), today, sizeof today);
+	snprintf(wanted, sizeof wanted, "- %s (parked %s)", title, today);
+	FILE *in = fopen(path, "r");
+	if (in == NULL) {
+		return;
+	}
+	int last = -1;
+	for (int i = 0; fgets(line, sizeof line, in) != NULL; i++) {
+		line[strcspn(line, "\r\n")] = '\0';
+		if (strcmp(line, wanted) == 0) last = i;
+	}
+	if (last == -1) {
+		fclose(in);
+		return;
+	}
+	rewind(in);   // back to the start, and copy every line but that one
+	FILE *out = start_write(path, tmp, sizeof tmp);
+	if (out == NULL) {
+		fclose(in);
+		return;
+	}
+	for (int i = 0; fgets(line, sizeof line, in) != NULL; i++) {
+		if (i != last) fputs(line, out);
+	}
+	fclose(in);
+	finish_write(out, tmp, path);
+}
+
+// Moves the note at `from` ("Done/cubesat.md") back into the folder `to`
+// ("now"). Writes where it is now into `now_at`. Returns 0 if it worked.
+int move_back(const char *from, const char *to, char *now_at, size_t size) {
+	Entry e;
+	snprintf(e.path, sizeof e.path, "%s/%s", base, from);
+	const char *slash = strrchr(from, '/');
+	snprintf(e.name, sizeof e.name, "%s", slash != NULL ? slash + 1 : from);
+	struct stat st;
+	if (stat(e.path, &st) == -1) {
+		snprintf(status, sizeof status, "can't undo it: %s isn't there anymore", from);
+		return -1;
+	}
+	if (move_note(&e, to, now_at, size) == -1) {
+		snprintf(status, sizeof status, "can't undo it: %s", strerror(errno));
+		return -1;
+	}
+	return 0;
+}
+
+// u: says what it would undo, and waits for u again (or the minutes, for a focus).
+void ask_undo(void) {
+	undo_line = find_undo();
+	if (undo_line == -1) {
+		snprintf(status, sizeof status, "nothing to undo today");
+		return;
+	}
+	char title[300];
+	note_title(undo_what.note, title, sizeof title);
+	if (strcmp(undo_what.action, "focus") == 0) {
+		undo_state = UNDO_MINUTES;
+		minutes_len = 0;
+		minutes[0] = '\0';
+		snprintf(status, sizeof status, "focus on %.100s was %.20s. minutes really: _ · Enter, Esc cancels",
+		         title, undo_what.extra);
+	} else {
+		undo_state = UNDO_ASKED;
+		char what[64];
+		if (strcmp(undo_what.action, "move") == 0) {
+			char group[32];
+			snprintf(group, sizeof group, "%.*s", (int)strcspn(undo_what.extra, "/"), undo_what.extra);
+			snprintf(what, sizeof what, "move to %s/", group);
+		} else {
+			snprintf(what, sizeof what, "%s", undo_what.action);
+		}
+		snprintf(status, sizeof status, "undo %s: %.100s? press u again, any other key cancels", what, title);
+	}
+}
+
+// The second u: puts things back the way they were before that line.
+void do_undo(void) {
+	LogLine l = undo_what;
+	char group[32], name[300], now_at[600] = "";
+	snprintf(group, sizeof group, "%.*s", (int)strcspn(l.note, "/"), l.note);   // "now" from "now/a.md"
+	note_title(l.note, name, sizeof name);
+	const char *file = strrchr(l.note, '/') != NULL ? strrchr(l.note, '/') + 1 : l.note;
+	char from[600];
+
+	if (strcmp(l.action, "done") == 0 || strcmp(l.action, "park") == 0) {
+		int park = l.action[0] == 'p';
+		snprintf(from, sizeof from, "%s/%s", park ? "someday" : "Done", file);
+		if (move_back(from, group, now_at, sizeof now_at) == -1) {
+			return;
+		}
+		if (park) {
+			unpark_line(name);
+		} else if (done_today > 0) {
+			done_today--;
+		}
+		if (n_picks < MAX_PICKS) {   // it was a pick before it got done or parked
+			snprintf(picks[n_picks], sizeof picks[n_picks], "%s", now_at);
+			n_picks++;
+		}
+	} else if (strcmp(l.action, "move") == 0) {
+		char back_to[32];
+		snprintf(back_to, sizeof back_to, "%s", group);
+		if (move_back(l.extra, back_to, now_at, sizeof now_at) == -1) {
+			return;
+		}
+		for (int i = 0; i < n_picks; i++) {
+			if (strcmp(picks[i], l.extra) == 0) {
+				snprintf(picks[i], sizeof picks[i], "%s", now_at);
+			}
+		}
+	} else if (strcmp(l.action, "pick") == 0) {
+		for (int i = 0; i < n_picks; i++) {
+			if (strcmp(picks[i], l.note) == 0) {
+				remove_pick(i);
+				break;
+			}
+		}
+	}
+	save_today();
+	change_log_line(undo_line, NULL);
+	refresh_notes();
+	snprintf(status, sizeof status, "undone: %s · %.100s", l.action, name);
+}
+
+// Enter after typing the minutes a focus really took. 0 takes the line away.
+void fix_focus(void) {
+	long real = strtol(minutes, NULL, 10);
+	char title[300];
+	note_title(undo_what.note, title, sizeof title);
+	if (real <= 0) {
+		change_log_line(undo_line, NULL);
+		snprintf(status, sizeof status, "undone: focus · %.100s", title);
+		return;
+	}
+	char spent[32], line[1100];
+	format_duration(real * 60, spent, sizeof spent);
+	char *last = strrchr(undo_raw, ' ');   // the space before the old time
+	if (last == NULL) {
+		return;
+	}
+	snprintf(line, sizeof line, "%.*s %s", (int)(last - undo_raw), undo_raw, spent);
+	change_log_line(undo_line, line);
+	snprintf(status, sizeof status, "focus on %.100s is %s now", title, spent);
+}
+
+// Every screen with u calls this first. Returns 1 if undo used the key.
+int undo_key(int key) {
+	if (undo_state == UNDO_ASKED) {
+		undo_state = UNDO_NONE;
+		if (key == 'u') {
+			do_undo();
+		}
+		return 1;   // any other key only cancels
+	}
+	if (undo_state == UNDO_MINUTES) {
+		if (key == KEY_ESC || key == 3) {
+			undo_state = UNDO_NONE;
+			return 1;
+		} else if (key == '\r' || key == '\n') {
+			undo_state = UNDO_NONE;
+			if (minutes_len > 0) {
+				fix_focus();
+			}
+			return 1;
+		} else if (key >= '0' && key <= '9' && minutes_len < 4) {
+			minutes[minutes_len++] = (char)key;
+			minutes[minutes_len] = '\0';
+		} else if ((key == 127 || key == 8) && minutes_len > 0) {
+			minutes[--minutes_len] = '\0';
+		}
+		char title[300];
+		note_title(undo_what.note, title, sizeof title);
+		snprintf(status, sizeof status, "focus on %.100s was %.20s. minutes really: %s_ · Enter, Esc cancels",
+		         title, undo_what.extra, minutes);
+		return 1;
+	}
+	if (key == 'u') {
+		ask_undo();
+		return 1;
+	}
+	return 0;
+}
+
 // h: opens "what you did". It reads the log fresh each time.
 void open_history(void) {
 	history_back = view;
@@ -2683,6 +2985,9 @@ int pick_key(int key) {
 	}
 	if (searching) {
 		search_key(key);   // letters go into the search, even q
+		return 0;
+	}
+	if (undo_key(key)) {
 		return 0;
 	}
 	if (key == 'q' || key == 3) {   // 3 is Ctrl-C
@@ -2783,6 +3088,9 @@ int note_key(int key) {
 		}
 		return 0;   // any other key only cancels
 	}
+	if (undo_key(key)) {
+		return 0;
+	}
 	if (key == 'q' || key == 3) {
 		return 1;
 	} else if (scroll_body_key(key)) {
@@ -2851,6 +3159,9 @@ int focus_key(int key) {
 // A key on the "done" screen. Returns 1 to quit.
 int done_key(int key) {
 	status[0] = '\0';
+	if (undo_key(key)) {
+		return 0;
+	}
 	if (key == 'q' || key == 3) {
 		return 1;
 	} else if (key == 'l' || key == 'n') {
@@ -3147,6 +3458,9 @@ void print_usage(FILE *out) {
 		"            t shows or hides all but NOW, r refresh, h history, P projects\n"
 		"  a note    d done, s next pick, p park (asks first), f focus, l list\n"
 		"            r refresh, h history, P projects, j/k scroll, q quit\n"
+		"  undo      u on the list, a note or the done screen undoes today's latest\n"
+		"            done, park, move or pick (asks first); u again goes further back.\n"
+		"            on a focus, it asks how many minutes it really was (0 removes it)\n"
 		"  focus     space pause, f stop, d done, j/k scroll\n"
 		"            in a small window it shows only the timer\n"
 		"  history   what you did: a star chart of the weeks (bigger = more focus,\n"
