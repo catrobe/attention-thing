@@ -9,10 +9,12 @@
 #include <string.h>    // strlen, strcmp, strrchr, strstr, strerror
 #include <time.h>      // time_t, time, localtime, mktime, strftime
 #include <dirent.h>    // opendir, readdir, closedir
+#include <signal.h>    // signal, SIGINT: ignored while your editor is open
 #include <sys/stat.h>  // stat, mkdir
+#include <sys/wait.h>  // waitpid: wait for your editor to close
 #include <sys/ioctl.h> // ioctl, TIOCGWINSZ: terminal size
 #include <termios.h>   // tcgetattr, tcsetattr: raw mode
-#include <unistd.h>    // read, write, isatty
+#include <unistd.h>    // read, write, isatty, fork, execl
 
 #define VERSION     "0.4.0"
 #define MAX_ENTRIES 128
@@ -741,7 +743,11 @@ int enable_raw_mode(void) {
 		return -1;
 	}
 	raw_mode_on = 1;
-	atexit(restore_terminal);
+	static int registered = 0;   // e switches raw mode off and on again; register once
+	if (!registered) {
+		atexit(restore_terminal);
+		registered = 1;
+	}
 
 	const char *enter = "\x1b[?1049h\x1b[?25l";   // alternate screen, hide cursor
 	write_all(enter, strlen(enter));
@@ -1250,6 +1256,12 @@ int searching = 0;      // 1 while you type after /
 int search_from;        // where the marker was before /, for Esc
 int search_was_open;    // were the groups open before /? Also for Esc
 
+// a: a new note's title, while you type it (the rest is in "Making notes")
+int adding = 0;          // 1 while you type a new note's title after a
+char new_title[200] = "";
+int new_len = 0;
+int add_group = 0;       // which group it goes in: the one the marker is in
+
 // "Şule İzmir" -> "şule izmir": lower case, Turkish capitals too. Letters keep
 // their marks, so ş only finds ş. English and Turkish disagree about I: here
 // it's i, so i finds i, I and İ, and ı finds only ı.
@@ -1477,6 +1489,13 @@ void draw_pick_screen(void) {
 		snprintf(typing, sizeof typing, "/%s_", search);
 		draw_wrapped(typing, rows - 2, left, width, 1);
 		draw_keys("[Enter] keep  [Esc] back", rows, left, width);
+		return;
+	}
+	if (adding) {
+		char typing[260];
+		snprintf(typing, sizeof typing, "new note in %s/: %s_", buckets[add_group], new_title);
+		draw_wrapped(typing, rows - 2, left, width, 1);
+		draw_keys("[Enter] make it  [Esc] back", rows, left, width);
 		return;
 	}
 	char prompt[128];
@@ -2228,6 +2247,8 @@ const KeyHelp keys_pick[] = {
 	{ "0-9, Enter", "pick up to 3" },
 	{ "j/k, arrows", "up and down" },
 	{ "J/K", "move up or down" },
+	{ "a", "add a note here" },
+	{ "e", "write in it, in your editor" },
 	{ "m", "move to another group" },
 	{ "/", "search, like vim" },
 	{ "n/N", "next or previous match" },
@@ -2245,6 +2266,7 @@ const KeyHelp keys_note[] = {
 	{ "s", "next pick" },
 	{ "p", "park (asks first)" },
 	{ "f", "focus" },
+	{ "e", "write in it, in your editor" },
 	{ "l", "list" },
 	{ "u", "undo (asks first)" },
 	{ "r", "refresh" },
@@ -2956,6 +2978,99 @@ int undo_key(int key) {
 	return 0;
 }
 
+// ---- Making notes (a) and writing in them (e) -----------------------------------
+
+// a: asks for a title, for a note in the group the marker is in.
+void start_adding(void) {
+	keep_cursor_in_list();
+	add_group = visible_notes() > 0 ? entries[cursor].group : 0;
+	new_len = 0;
+	new_title[0] = '\0';
+	adding = 1;
+}
+
+// Enter after the title: makes "title.md" in that group's folder. Never
+// overwrites: "wx" makes fopen fail if the file is already there.
+void finish_adding(void) {
+	char *title = trim(new_title);
+	if (title[0] == '\0') {
+		return;   // nothing typed: nothing made
+	}
+	if (strchr(title, '/') != NULL || title[0] == '.') {
+		snprintf(status, sizeof status, "a title can't have / in it or start with .");
+		return;
+	}
+	char path[1024], made[300];
+	snprintf(made, sizeof made, "%s/%s.md", buckets[add_group], title);
+	snprintf(path, sizeof path, "%s/%s", base, made);
+	FILE *f = fopen(path, "wx");
+	if (f == NULL) {
+		if (errno == EEXIST) {
+			snprintf(status, sizeof status, "there's already a note called that");
+		} else {
+			snprintf(status, sizeof status, "couldn't make it: %s", strerror(errno));
+		}
+		return;
+	}
+	fclose(f);
+	refresh_notes();
+	int index = find_entry(made);
+	if (index != -1) {
+		jump_to(index);   // the marker goes to the new note, opening the groups if needed
+	}
+	snprintf(status, sizeof status, "made %.200s", made);
+}
+
+// A key while you type a new title.
+void add_key(int key) {
+	if (key == KEY_ESC || key == 3) {
+		adding = 0;
+	} else if (key == '\r' || key == '\n') {
+		adding = 0;
+		finish_adding();
+	} else if ((key == 127 || key == 8) && new_len > 0) {   // Backspace
+		new_len--;
+		while (new_len > 0 && ((unsigned char)new_title[new_len] & 0xC0) == 0x80) {
+			new_len--;   // the middle of a letter like ş: take the whole letter away
+		}
+		new_title[new_len] = '\0';
+	} else if (key >= 0x20 && key <= 0xff && key != 127 && new_len < (int)sizeof new_title - 1) {
+		new_title[new_len++] = (char)key;
+		new_title[new_len] = '\0';
+	}
+}
+
+// e: opens the note in your own editor ($VISUAL, then $EDITOR, else vi).
+// atthing gives the terminal back, waits until you close the editor, then
+// reads the folders again so it shows what you wrote.
+void edit_note(const char *note_path) {
+	const char *editor = getenv("VISUAL");
+	if (editor == NULL || editor[0] == '\0') editor = getenv("EDITOR");
+	if (editor == NULL || editor[0] == '\0') editor = "vi";
+	char path[1024], command[600];
+	snprintf(path, sizeof path, "%s", note_path);   // a copy: refresh_notes() refills entries[]
+	snprintf(command, sizeof command, "%s \"$1\"", editor);   // the path goes in as $1, so spaces are fine
+
+	restore_terminal();
+	signal(SIGINT, SIG_IGN);   // Ctrl-C belongs to the editor now, not to atthing
+	pid_t pid = fork();        // two copies of atthing from here on
+	if (pid == 0) {
+		signal(SIGINT, SIG_DFL);
+		execl("/bin/sh", "sh", "-c", command, "sh", path, (char *)NULL);   // the copy becomes the editor
+		_exit(127);   // only reached if that didn't work
+	}
+	if (pid > 0) {
+		int how;
+		waitpid(pid, &how, 0);   // the original waits here until the editor closes
+	}
+	signal(SIGINT, SIG_DFL);
+	enable_raw_mode();
+	if (pid == -1) {
+		snprintf(status, sizeof status, "couldn't open the editor: %s", strerror(errno));
+	}
+	refresh_notes();
+}
+
 // h: opens "what you did". It reads the log fresh each time.
 void open_history(void) {
 	history_back = view;
@@ -2985,6 +3100,10 @@ int pick_key(int key) {
 	}
 	if (searching) {
 		search_key(key);   // letters go into the search, even q
+		return 0;
+	}
+	if (adding) {
+		add_key(key);      // letters go into the title, even q
 		return 0;
 	}
 	if (undo_key(key)) {
@@ -3019,6 +3138,13 @@ int pick_key(int key) {
 	} else if (key == KEY_ESC && search_len > 0) {
 		search_len = 0;   // Esc clears the search first; the next Esc goes back
 		search[0] = '\0';
+	} else if (key == 'a') {
+		start_adding();
+	} else if (key == 'e') {
+		keep_cursor_in_list();
+		if (visible_notes() > 0) {
+			edit_note(entries[cursor].path);
+		}
 	} else if (key == 'm') {
 		ask_move();
 	} else if (key == 't') {
@@ -3104,6 +3230,11 @@ int note_key(int key) {
 	} else if (key == 's') {
 		current = (current + 1) % n_picks;   // after the last pick, back to the first
 		body_scroll = 0;
+	} else if (key == 'e') {
+		int index = find_entry(picks[current]);
+		if (index != -1) {
+			edit_note(entries[index].path);
+		}
 	} else if (key == 'f') {
 		focus_before = 0;
 		focus_start = time(NULL);
@@ -3411,7 +3542,7 @@ int run_screen(int force_pick) {
 		int quit = 0;
 		if (show_keys) {
 			show_keys = 0;   // any key closes the ? box, and does nothing else
-		} else if (key == '?' && !searching) {
+		} else if (key == '?' && !searching && !adding) {
 			show_keys = 1;
 		} else if (view == VIEW_PICK) {
 			quit = pick_key(key);
@@ -3455,8 +3586,9 @@ void print_usage(FILE *out) {
 		"            j/k or arrows go up/down, J/K or Shift+arrows move a note\n"
 		"            m then a number moves it to another group\n"
 		"            / searches the titles like vim: n next, N previous, Esc clears\n"
+		"            a adds a note in the marker's group, e opens it in $EDITOR\n"
 		"            t shows or hides all but NOW, r refresh, h history, P projects\n"
-		"  a note    d done, s next pick, p park (asks first), f focus, l list\n"
+		"  a note    d done, s next pick, p park (asks first), f focus, l list, e edit\n"
 		"            r refresh, h history, P projects, j/k scroll, q quit\n"
 		"  undo      u on the list, a note or the done screen undoes today's latest\n"
 		"            done, park, move or pick (asks first); u again goes further back.\n"
