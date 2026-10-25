@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 M. Ömer Okyar
 
+#define _POSIX_C_SOURCE 200809L   // asks the system headers for POSIX 2008, for sigaction
+
 #include <ctype.h>     // toupper, tolower
 #include <errno.h>     // errno, EAGAIN, EEXIST
 #include <limits.h>    // INT_MAX
@@ -9,7 +11,7 @@
 #include <string.h>    // strlen, strcmp, strrchr, strstr, strerror
 #include <time.h>      // time_t, time, localtime, mktime, strftime
 #include <dirent.h>    // opendir, readdir, closedir
-#include <signal.h>    // signal, SIGINT: ignored while your editor is open
+#include <signal.h>    // signal, sigaction, SIGINT, SIGWINCH
 #include <sys/stat.h>  // stat, mkdir
 #include <sys/wait.h>  // waitpid: wait for your editor to close
 #include <sys/ioctl.h> // ioctl, TIOCGWINSZ: terminal size
@@ -725,6 +727,18 @@ void restore_terminal(void) {
 	raw_mode_on = 0;
 }
 
+// The kernel sends SIGWINCH whenever the window changes size. A signal can
+// arrive in the middle of anything, so the handler only sets a flag, and the
+// screen loops redraw when they see it. Checking the size alone missed a
+// quick zoom in and out that ends at the same size, and left the screen half
+// drawn (issue #65).
+volatile sig_atomic_t window_changed = 0;
+
+void on_window_change(int sig) {
+	(void)sig;   // there's only one signal it's used for
+	window_changed = 1;
+}
+
 // Raw mode: every key reaches us immediately (no Enter), and isn't printed.
 // Also switches to the alternate screen, so your shell comes back untouched.
 int enable_raw_mode(void) {
@@ -746,6 +760,12 @@ int enable_raw_mode(void) {
 	static int registered = 0;   // e switches raw mode off and on again; register once
 	if (!registered) {
 		atexit(restore_terminal);
+		struct sigaction sa;
+		memset(&sa, 0, sizeof sa);
+		sa.sa_handler = on_window_change;
+		sa.sa_flags = SA_RESTART;   // a read() it interrupts just carries on
+		sigemptyset(&sa.sa_mask);
+		sigaction(SIGWINCH, &sa, NULL);
 		registered = 1;
 	}
 
@@ -785,7 +805,7 @@ enum {
 int read_key(void) {
 	unsigned char c;
 	ssize_t got = read(STDIN_FILENO, &c, 1);
-	if (got == -1 && errno != EAGAIN) {
+	if (got == -1 && errno != EAGAIN && errno != EINTR) {   // EINTR: a signal came, not a problem
 		return KEY_GONE;
 	}
 	if (got != 1) {
@@ -3368,7 +3388,9 @@ void edit_note(const char *note_path) {
 	}
 	if (pid > 0) {
 		int how;
-		waitpid(pid, &how, 0);   // the original waits here until the editor closes
+		while (waitpid(pid, &how, 0) == -1 && errno == EINTR) {
+			// a resize while the editor is open: keep waiting
+		}
 	}
 	signal(SIGINT, SIG_DFL);
 	enable_raw_mode();
@@ -3912,9 +3934,10 @@ int run_setup(void) {
 	for (;;) {
 		int rows, cols;
 		get_screen_size(&rows, &cols);
-		if (rows != last_rows || cols != last_cols) {
+		if (rows != last_rows || cols != last_cols || window_changed) {
 			last_rows = rows;
 			last_cols = cols;
+			window_changed = 0;
 			redraw = 1;
 		}
 		if (redraw) {
@@ -3982,9 +4005,10 @@ int run_screen(int force_pick) {
 	for (;;) {
 		int rows, cols;
 		get_screen_size(&rows, &cols);
-		if (rows != last_rows || cols != last_cols) {   // window was resized
+		if (rows != last_rows || cols != last_cols || window_changed) {   // window was resized
 			last_rows = rows;
 			last_cols = cols;
+			window_changed = 0;
 			redraw = 1;
 		}
 		if (view == VIEW_FOCUS && focus_seconds() != focus_shown) {
