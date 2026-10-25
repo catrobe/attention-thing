@@ -1035,7 +1035,7 @@ void upper(const char *in, char *out, size_t size) {
 
 // ---- Screens ------------------------------------------------------------------------
 
-enum { VIEW_PICK, VIEW_NOTE, VIEW_DONE, VIEW_FOCUS, VIEW_HISTORY, VIEW_PROJECTS } view;
+enum { VIEW_PICK, VIEW_NOTE, VIEW_DONE, VIEW_FOCUS, VIEW_HISTORY, VIEW_PROJECTS, VIEW_TRASH } view;
 
 int current = 0;          // which of today's picks is on screen
 char status[256] = "";    // a one-line message, e.g. an error
@@ -1265,6 +1265,11 @@ int adding = 0;          // 1 while you type a new note's title after a
 char new_title[200] = "";
 int new_len = 0;
 int add_group = 0;       // which group it goes in: the one the marker is in
+
+// : a command line for rare things, like in vim (the rest is in "Commands")
+int commanding = 0;      // 1 while you type after :
+char command[32] = "";
+int command_len = 0;
 
 // "Şule İzmir" -> "şule izmir": lower case, Turkish capitals too. Letters keep
 // their marks, so ş only finds ş. English and Turkish disagree about I: here
@@ -1500,6 +1505,13 @@ void draw_pick_screen(void) {
 		snprintf(typing, sizeof typing, "new note in %s/: %s_", buckets[add_group], new_title);
 		draw_wrapped(typing, rows - 2, left, width, 1);
 		draw_keys("[Enter] make it  [Esc] back", rows, left, width);
+		return;
+	}
+	if (commanding) {
+		char typing[48];
+		snprintf(typing, sizeof typing, ":%s_", command);
+		draw_wrapped(typing, rows - 2, left, width, 1);
+		draw_keys("[Enter] run  [Esc] back", rows, left, width);
 		return;
 	}
 	char prompt[128];
@@ -2239,6 +2251,117 @@ void draw_projects_screen(void) {
 	draw_keys("[Esc] back", rows, left, width);
 }
 
+// ---- The trash (:trash) ------------------------------------------------------------
+// Notes deleted with dd wait in .trash/<their group>/ until you empty it.
+
+#define MAX_TRASH 256
+
+typedef struct {
+	char rel[600];     // ".trash/now/buy milk.md"
+	char group[64];    // "now": where Enter puts it back
+	char title[256];
+} Trashed;
+
+Trashed trash[MAX_TRASH];
+int n_trash = 0;
+int trash_cursor = 0;   // which note the > marker is on
+int trash_scroll = 0;
+
+// By group, then by title.
+int compare_trash(const void *a, const void *b) {
+	const Trashed *x = a;
+	const Trashed *y = b;
+	int by_group = strcmp(x->group, y->group);
+	return by_group != 0 ? by_group : strcmp(x->title, y->title);
+}
+
+// Finds every note in .trash/'s folders.
+void load_trash(void) {
+	n_trash = 0;
+	char dir[700];
+	snprintf(dir, sizeof dir, "%s/.trash", base);
+	DIR *d = opendir(dir);
+	if (d != NULL) {
+		struct dirent *g;
+		while ((g = readdir(d)) != NULL) {
+			if (g->d_name[0] == '.') {
+				continue;   // ".", ".."
+			}
+			char sub[1024];
+			snprintf(sub, sizeof sub, "%s/%s", dir, g->d_name);
+			DIR *in = opendir(sub);
+			if (in == NULL) {
+				continue;   // a file, not a group's folder
+			}
+			struct dirent *f;
+			while ((f = readdir(in)) != NULL && n_trash < MAX_TRASH) {
+				if (!is_note(f->d_name)) {
+					continue;
+				}
+				Trashed *t = &trash[n_trash++];
+				snprintf(t->rel, sizeof t->rel, ".trash/%.60s/%.250s", g->d_name, f->d_name);
+				snprintf(t->group, sizeof t->group, "%.60s", g->d_name);
+				note_title(t->rel, t->title, sizeof t->title);
+			}
+			closedir(in);
+		}
+		closedir(d);
+	}
+	qsort(trash, n_trash, sizeof trash[0], compare_trash);
+	if (trash_cursor >= n_trash) trash_cursor = n_trash - 1;
+	if (trash_cursor < 0) trash_cursor = 0;
+}
+
+void draw_trash_screen(void) {
+	int rows, cols;
+	if (begin_frame(&rows, &cols) == -1) {
+		return;
+	}
+	int left = 3;
+	int width = cols - 4;
+	char head[64];
+	snprintf(head, sizeof head, "TRASH · %d note%s", n_trash, n_trash == 1 ? "" : "s");
+	draw_styled("\x1b[2m", head, 2, left, width, 1);
+
+	int top = 4;
+	int list_rows = rows - 4 - top;   // leave room for a message, the command line and the keys
+	if (n_trash == 0) {
+		draw_wrapped("the trash is empty", top, left, width, 1);
+	}
+	if (trash_cursor < trash_scroll) trash_scroll = trash_cursor;
+	if (trash_cursor >= trash_scroll + list_rows) trash_scroll = trash_cursor - list_rows + 1;
+	if (trash_scroll < 0) trash_scroll = 0;
+	for (int i = trash_scroll; i < n_trash && i < trash_scroll + list_rows; i++) {
+		int row = top + i - trash_scroll;
+		char group[70];
+		snprintf(group, sizeof group, "%s/", trash[i].group);
+		draw_wrapped(i == trash_cursor ? ">" : " ", row, left, 1, 1);
+		draw_styled("\x1b[2m", group, row, left + 2, 8, 1);
+		draw_wrapped(trash[i].title, row, left + 10, width - 10, 1);
+	}
+
+	if (status[0] != '\0') {
+		draw_styled("\x1b[2m", status, rows - 3, left, width, 1);
+	}
+	if (commanding) {
+		char warn[80], typing[48];
+		if (n_trash == 1) {
+			snprintf(warn, sizeof warn, ":empty deletes it for good");
+		} else {
+			snprintf(warn, sizeof warn, ":empty deletes all %d notes for good", n_trash);
+		}
+		if (status[0] == '\0' && n_trash > 0) {
+			draw_styled("\x1b[2m", warn, rows - 3, left, width, 1);   // said before you can do it
+		}
+		snprintf(typing, sizeof typing, ":%s_", command);
+		draw_wrapped(typing, rows - 2, left, width, 1);
+		draw_keys("[Enter] run  [Esc] back", rows, left, width);
+	} else {
+		draw_keys(n_trash > 0 ? "[Enter] bring it back  [Esc] back  [?] more" : "[Esc] back  [?] more",
+		          rows, left, width);
+	}
+}
+
 // ---- The ? box: every key for the screen you're on -------------------------------
 
 typedef struct {
@@ -2254,6 +2377,7 @@ const KeyHelp keys_pick[] = {
 	{ "a", "add a note here" },
 	{ "e", "write in it, in your editor" },
 	{ "dd", "delete (u brings it back)" },
+	{ ":trash", "deleted notes" },
 	{ "m", "move to another group" },
 	{ "/", "search, like vim" },
 	{ "n/N", "next or previous match" },
@@ -2301,6 +2425,14 @@ const KeyHelp keys_done[] = {
 	{ "q", "quit" },
 	{ NULL, NULL }
 };
+const KeyHelp keys_trash[] = {
+	{ "Enter", "bring it back to its group" },
+	{ "j/k, arrows", "up and down" },
+	{ ":empty", "delete them all for good" },
+	{ "Esc", "back to the list" },
+	{ "q", "quit" },
+	{ NULL, NULL }
+};
 const KeyHelp keys_history[] = {
 	{ "j/k, arrows", "scroll" },
 	{ "r", "refresh" },
@@ -2324,6 +2456,7 @@ const KeyHelp *keys_for_view(void) {
 	if (view == VIEW_FOCUS) return keys_focus;
 	if (view == VIEW_HISTORY) return keys_history;
 	if (view == VIEW_PROJECTS) return keys_projects;
+	if (view == VIEW_TRASH) return keys_trash;
 	return keys_done;
 }
 
@@ -2396,6 +2529,8 @@ void draw_screen(void) {
 		draw_history_screen();
 	} else if (view == VIEW_PROJECTS) {
 		draw_projects_screen();
+	} else if (view == VIEW_TRASH) {
+		draw_trash_screen();
 	} else {
 		draw_done_screen();
 	}
@@ -2803,6 +2938,14 @@ int find_undo(void) {
 		line[strcspn(line, "\r\n")] = '\0';
 		LogLine parts;
 		if (strncmp(line, today, 10) == 0 && parse_log_line(line, &parts) == 0) {
+			if (strcmp(parts.action, "delete") == 0) {
+				char gone[1024];
+				struct stat st;
+				snprintf(gone, sizeof gone, "%s/%s", base, parts.extra);
+				if (stat(gone, &st) == -1) {
+					continue;   // the trash was emptied: there's nothing to bring back
+				}
+			}
 			found = i;
 			undo_what = parts;
 			snprintf(undo_raw, sizeof undo_raw, "%s", line);
@@ -3252,6 +3395,144 @@ void open_projects(void) {
 	view = VIEW_PROJECTS;
 }
 
+// ---- Commands (:) and the trash screen's keys ---------------------------------------
+
+// The last delete line in the log for the note now at `rel` (".trash/now/a.md"),
+// or -1 if there isn't one.
+int find_delete_line(const char *rel) {
+	char path[1024], line[1024];
+	snprintf(path, sizeof path, "%s/log", state_dir);
+	FILE *f = fopen(path, "r");
+	if (f == NULL) {
+		return -1;
+	}
+	int found = -1;
+	for (int i = 0; fgets(line, sizeof line, f) != NULL; i++) {
+		line[strcspn(line, "\r\n")] = '\0';
+		LogLine parts;
+		if (parse_log_line(line, &parts) == 0 && strcmp(parts.action, "delete") == 0 &&
+		    strcmp(parts.extra, rel) == 0) {
+			found = i;
+		}
+	}
+	fclose(f);
+	return found;
+}
+
+// Enter on the trash screen: the note goes back to its group, and its delete
+// line leaves the log, as if it had never been deleted.
+void restore_from_trash(int i) {
+	if (i < 0 || i >= n_trash) {
+		return;
+	}
+	Trashed t = trash[i];   // a copy, because load_trash() refills trash[]
+	char now_at[600];
+	if (move_back(t.rel, t.group, now_at, sizeof now_at) == -1) {
+		return;
+	}
+	int line = find_delete_line(t.rel);
+	if (line != -1) {
+		change_log_line(line, NULL, 0);
+	}
+	n_redo = 0;   // the log changed under it, so redo would put lines in the wrong place
+	load_trash();
+	snprintf(status, sizeof status, "back in %.60s/ · %.120s", t.group, t.title);
+}
+
+// :empty on the trash screen: deletes every note in .trash/ for good. The one
+// thing in atthing that u can't undo.
+void empty_trash(void) {
+	int gone = 0;
+	for (int i = 0; i < n_trash; i++) {
+		char path[1200];
+		snprintf(path, sizeof path, "%s/%s", base, trash[i].rel);
+		if (remove(path) == 0) {
+			gone++;
+		}
+	}
+	for (int i = 0; i < n_trash; i++) {   // the group folders inside .trash/, now empty
+		char dir[1024];
+		snprintf(dir, sizeof dir, "%s/.trash/%s", base, trash[i].group);
+		rmdir(dir);   // fails, harmlessly, if something else is still in it
+	}
+	n_redo = 0;
+	load_trash();
+	snprintf(status, sizeof status, "emptied · %d note%s gone for good", gone, gone == 1 ? "" : "s");
+}
+
+void open_trash(void) {
+	load_trash();
+	trash_cursor = 0;
+	trash_scroll = 0;
+	view = VIEW_TRASH;
+}
+
+void start_command(void) {
+	commanding = 1;
+	command_len = 0;
+	command[0] = '\0';
+}
+
+// Enter after :something. Each screen has its own commands.
+void run_command(void) {
+	char *c = trim(command);
+	if (view == VIEW_PICK && strcmp(c, "trash") == 0) {
+		open_trash();
+	} else if (view == VIEW_TRASH && strcmp(c, "empty") == 0) {
+		empty_trash();
+	} else if (c[0] != '\0') {
+		snprintf(status, sizeof status, "there's no :%.24s here", c);
+	}
+}
+
+// A key while you type after :.
+void command_key(int key) {
+	if (key == KEY_ESC || key == 3) {
+		commanding = 0;
+	} else if (key == '\r' || key == '\n') {
+		commanding = 0;
+		run_command();
+	} else if (key == 127 || key == 8) {   // Backspace
+		if (command_len == 0) {
+			commanding = 0;   // like vim: Backspace on nothing closes it
+			return;
+		}
+		command[--command_len] = '\0';
+	} else if (key >= 0x20 && key < 0x7f && command_len < (int)sizeof command - 1) {
+		command[command_len++] = (char)key;
+		command[command_len] = '\0';
+	}
+}
+
+// A key on the trash screen. Returns 1 to quit.
+int trash_key(int key) {
+	status[0] = '\0';
+	if (commanding) {
+		command_key(key);
+		return 0;
+	}
+	if (key == 'q' || key == 3) {
+		return 1;
+	} else if (key == KEY_ESC) {
+		go_back(VIEW_PICK);
+	} else if (key == 'j' || key == KEY_DOWN) {
+		trash_cursor++;
+	} else if (key == 'k' || key == KEY_UP) {
+		trash_cursor--;
+	} else if (key == KEY_PAGE_DOWN) {
+		trash_cursor += 10;
+	} else if (key == KEY_PAGE_UP) {
+		trash_cursor -= 10;
+	} else if (key == '\r' || key == '\n') {
+		restore_from_trash(trash_cursor);
+	} else if (key == ':') {
+		start_command();
+	}
+	if (trash_cursor >= n_trash) trash_cursor = n_trash - 1;
+	if (trash_cursor < 0) trash_cursor = 0;
+	return 0;
+}
+
 // A key on the pick screen. Returns 1 to quit.
 int pick_key(int key) {
 	status[0] = '\0';
@@ -3275,6 +3556,10 @@ int pick_key(int key) {
 	}
 	if (adding) {
 		add_key(key);      // letters go into the title, even q
+		return 0;
+	}
+	if (commanding) {
+		command_key(key);
 		return 0;
 	}
 	if (undo_key(key)) {
@@ -3315,6 +3600,8 @@ int pick_key(int key) {
 			delete_asked = 1;
 			snprintf(status, sizeof status, "d again deletes it, any other key cancels");
 		}
+	} else if (key == ':') {
+		start_command();
 	} else if (key == 'a') {
 		start_adding();
 	} else if (key == 'e') {
@@ -3719,7 +4006,7 @@ int run_screen(int force_pick) {
 		int quit = 0;
 		if (show_keys) {
 			show_keys = 0;   // any key closes the ? box, and does nothing else
-		} else if (key == '?' && !searching && !adding) {
+		} else if (key == '?' && !searching && !adding && !commanding) {
 			show_keys = 1;
 		} else if (view == VIEW_PICK) {
 			quit = pick_key(key);
@@ -3731,6 +4018,8 @@ int run_screen(int force_pick) {
 			quit = history_key(key);
 		} else if (view == VIEW_PROJECTS) {
 			quit = projects_key(key);
+		} else if (view == VIEW_TRASH) {
+			quit = trash_key(key);
 		} else {
 			quit = done_key(key);
 		}
@@ -3765,6 +4054,8 @@ void print_usage(FILE *out) {
 		"            / searches the titles like vim: n next, N previous, Esc clears\n"
 		"            a adds a note in the marker's group, e opens it in $EDITOR\n"
 		"            dd deletes it: it goes to .trash/ in the notes folder\n"
+		"            :trash shows the deleted notes: Enter brings one back,\n"
+		"            :empty deletes them all for good\n"
 		"            t shows or hides all but NOW, r refresh, h history, P projects\n"
 		"  a note    d done, s next pick, p park (asks first), f focus, l list, e edit\n"
 		"            r refresh, h history, P projects, j/k scroll, q quit\n"

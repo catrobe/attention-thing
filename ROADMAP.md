@@ -53,6 +53,7 @@ if it closes things, not if it opens more.
 - [x] Undo with `u`, and fix a focus you forgot to stop
 - [x] Make a note with `a`, write in it with `e` in your own editor
 - [x] Delete with `dd` (into `.trash/`), redo with `Ctrl-R`
+- [x] `:trash` to see deleted notes, bring them back or empty the trash
 
 - Parked and someday notes come back when their time comes
 - Timer that knows the estimate written in a note
