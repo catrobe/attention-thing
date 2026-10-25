@@ -1060,9 +1060,13 @@ long focus_seconds(void) {
 
 // ---- Actions ----------------------------------------------------------------------
 
+int n_redo = 0;   // how many undone steps Ctrl-R can redo (see "Undo")
+
 // Adds one line to .atthing/log, e.g. "2026-09-10 14:22  done   now/cubesat.md".
-// `extra` goes at the end of the line; pass "" for nothing.
+// `extra` goes at the end of the line; pass "" for nothing. Something new
+// happened, so like in vim, what u undid can't be redone anymore.
 void log_action(const char *action, const Entry *e, const char *extra) {
+	n_redo = 0;
 	char path[1024], stamp[32];
 	snprintf(path, sizeof path, "%s/log", state_dir);
 	time_t now = time(NULL);
@@ -1086,7 +1090,7 @@ void log_action(const char *action, const Entry *e, const char *extra) {
 int move_note(const Entry *e, const char *to, char *moved, size_t moved_size) {
 	char dir[1024], dest[1400];
 	snprintf(dir, sizeof dir, "%s/%s", base, to);
-	if (ensure_dir(dir) == -1) {
+	if (make_dirs(dir) == -1) {   // make_dirs: "to" can be two folders deep, like .trash/now
 		return -1;
 	}
 	snprintf(dest, sizeof dest, "%s/%s", dir, e->name);
@@ -2249,11 +2253,13 @@ const KeyHelp keys_pick[] = {
 	{ "J/K", "move up or down" },
 	{ "a", "add a note here" },
 	{ "e", "write in it, in your editor" },
+	{ "dd", "delete (u brings it back)" },
 	{ "m", "move to another group" },
 	{ "/", "search, like vim" },
 	{ "n/N", "next or previous match" },
 	{ "t", "show or hide all but NOW" },
 	{ "u", "undo (asks first)" },
+	{ "Ctrl-R", "redo" },
 	{ "r", "refresh" },
 	{ "h", "what you did" },
 	{ "P", "projects" },
@@ -2269,6 +2275,7 @@ const KeyHelp keys_note[] = {
 	{ "e", "write in it, in your editor" },
 	{ "l", "list" },
 	{ "u", "undo (asks first)" },
+	{ "Ctrl-R", "redo" },
 	{ "r", "refresh" },
 	{ "h", "what you did" },
 	{ "P", "projects" },
@@ -2287,6 +2294,7 @@ const KeyHelp keys_focus[] = {
 const KeyHelp keys_done[] = {
 	{ "l", "list" },
 	{ "u", "undo (asks first)" },
+	{ "Ctrl-R", "redo" },
 	{ "r", "refresh" },
 	{ "h", "what you did" },
 	{ "P", "projects" },
@@ -2607,6 +2615,38 @@ void move_to_group(int choice) {
 	snprintf(status, sizeof status, "moved to %s/", group);
 }
 
+// dd: deletes the note under the marker. It goes to .trash/<its group>/ in the
+// notes folder (hidden in Obsidian), so u can bring it back to the same group.
+
+int delete_asked = 0;   // 1 after the first d: a second d deletes, any other key cancels
+
+void delete_note(void) {
+	keep_cursor_in_list();
+	if (visible_notes() == 0) {
+		return;
+	}
+	Entry e = entries[cursor];   // a copy, because reload() below refills entries[]
+	char was[300], to[64], now_at[600];
+	snprintf(was, sizeof was, "%s/%s", e.bucket, e.name);
+	snprintf(to, sizeof to, ".trash/%s", e.bucket);
+	remember_typed();
+	if (move_note(&e, to, now_at, sizeof now_at) == -1) {
+		snprintf(status, sizeof status, "couldn't delete it: %s", strerror(errno));
+		return;
+	}
+	log_action("delete", &e, now_at);   // "... delete now/a.md  .trash/now/a.md"
+	for (int i = 0; i < n_picks; i++) {
+		if (strcmp(picks[i], was) == 0) {
+			remove_pick(i);
+			save_today();
+			break;
+		}
+	}
+	reload();
+	retype();
+	snprintf(status, sizeof status, "deleted · u brings it back");
+}
+
 // Looks at the folders again, for notes that were added, changed, moved or
 // removed since atthing opened. The marker, the typed numbers and the note on
 // screen keep pointing at the same notes, if they're still there.
@@ -2699,6 +2739,7 @@ char minutes[8] = "";      // typed after u on a focus line
 int minutes_len = 0;
 
 // "2026-09-21 14:22  move   now/a.md  next/a.md" -> action, note, extra.
+// A delete line ends with where the note went: "  .trash/now/a.md".
 // Returns 0 if it's a line undo understands.
 int parse_log_line(const char *line, LogLine *out) {
 	if (strlen(line) < 18) {
@@ -2726,6 +2767,9 @@ int parse_log_line(const char *line, LogLine *out) {
 			char *at = strstr(out->note, find);
 			if (at != NULL && (split == NULL || at > split)) split = at + 1;
 		}
+	} else if (strcmp(out->action, "delete") == 0) {
+		char *at = strstr(out->note, "  .trash/");
+		if (at != NULL) split = at + 1;
 	} else if (strcmp(out->action, "done") != 0 && strcmp(out->action, "park") != 0 &&
 	           strcmp(out->action, "pick") != 0) {
 		return -1;
@@ -2736,8 +2780,10 @@ int parse_log_line(const char *line, LogLine *out) {
 	}
 	char *end = out->note + strlen(out->note);
 	while (end > out->note && end[-1] == ' ') *--end = '\0';   // spaces before the extra
-	if (out->note[0] == '\0' || (split == NULL && out->action[0] != 'd' && out->action[0] != 'p')) {
-		return -1;   // a focus or move line without its last part
+	int needs_extra = strcmp(out->action, "focus") == 0 || strcmp(out->action, "move") == 0 ||
+	                  strcmp(out->action, "delete") == 0;
+	if (out->note[0] == '\0' || (needs_extra && split == NULL)) {
+		return -1;   // a focus, move or delete line without its last part
 	}
 	return 0;
 }
@@ -2766,8 +2812,10 @@ int find_undo(void) {
 	return found;
 }
 
-// Writes the log again without line `number`, or with `replacement` in its place.
-int change_log_line(int number, const char *replacement) {
+// Writes the log again with line `number` (counted from 0) changed: taken
+// out when `text` is NULL, replaced by `text`, or with `insert`, `text` put
+// in before it (after the last line, if there are fewer lines than that).
+int change_log_line(int number, const char *text, int insert) {
 	char path[1024], tmp[1100], line[1024];
 	snprintf(path, sizeof path, "%s/log", state_dir);
 	FILE *in = fopen(path, "r");
@@ -2779,12 +2827,17 @@ int change_log_line(int number, const char *replacement) {
 		fclose(in);
 		return -1;
 	}
-	for (int i = 0; fgets(line, sizeof line, in) != NULL; i++) {
-		if (i != number) {
-			fputs(line, out);
-		} else if (replacement != NULL) {
-			fprintf(out, "%s\n", replacement);
+	int i;
+	for (i = 0; fgets(line, sizeof line, in) != NULL; i++) {
+		if (i == number && text != NULL) {
+			fprintf(out, "%s\n", text);
 		}
+		if (i != number || insert) {
+			fputs(line, out);
+		}
+	}
+	if (insert && i <= number) {
+		fprintf(out, "%s\n", text);   // it goes at the very end
 	}
 	fclose(in);
 	return finish_write(out, tmp, path);
@@ -2822,23 +2875,128 @@ void unpark_line(const char *title) {
 	finish_write(out, tmp, path);
 }
 
-// Moves the note at `from` ("Done/cubesat.md") back into the folder `to`
-// ("now"). Writes where it is now into `now_at`. Returns 0 if it worked.
+// Fills in the path, name and title of the note at `rel` ("Done/cubesat.md"),
+// enough for move_note() and park_note().
+void entry_at(const char *rel, Entry *e) {
+	snprintf(e->path, sizeof e->path, "%s/%s", base, rel);
+	const char *slash = strrchr(rel, '/');
+	snprintf(e->name, sizeof e->name, "%s", slash != NULL ? slash + 1 : rel);
+	note_title(rel, e->title, sizeof e->title);
+}
+
+// Moves the note at `from` ("Done/cubesat.md") into the folder `to` ("now").
+// Writes where it is now into `now_at`. Returns 0 if it worked.
 int move_back(const char *from, const char *to, char *now_at, size_t size) {
 	Entry e;
-	snprintf(e.path, sizeof e.path, "%s/%s", base, from);
-	const char *slash = strrchr(from, '/');
-	snprintf(e.name, sizeof e.name, "%s", slash != NULL ? slash + 1 : from);
+	entry_at(from, &e);
 	struct stat st;
 	if (stat(e.path, &st) == -1) {
-		snprintf(status, sizeof status, "can't undo it: %s isn't there anymore", from);
+		snprintf(status, sizeof status, "can't find %.200s anymore", from);
 		return -1;
 	}
 	if (move_note(&e, to, now_at, size) == -1) {
-		snprintf(status, sizeof status, "can't undo it: %s", strerror(errno));
+		snprintf(status, sizeof status, "couldn't move it: %s", strerror(errno));
 		return -1;
 	}
 	return 0;
+}
+
+// ---- Redo (Ctrl-R) ----
+// Every u that worked is remembered here, newest last. Ctrl-R does the
+// newest one again. Like vim, it's forgotten when something new happens
+// (log_action) and when you quit.
+
+#define MAX_REDO 32
+
+typedef struct {
+	LogLine what;       // the line u took out (or changed)
+	char raw[1024];     // that line, as it was in the log
+	int line;           // where it was in the log
+	char now_at[600];   // where u put the note back, e.g. "now/a.md"
+	int fixed;          // 1 if u changed a focus's minutes instead of taking the line out
+} Redo;
+
+Redo redo[MAX_REDO];
+
+void remember_redo(const char *now_at, int fixed) {
+	if (n_redo == MAX_REDO) {
+		memmove(redo, redo + 1, (MAX_REDO - 1) * sizeof redo[0]);   // forget the oldest
+		n_redo--;
+	}
+	Redo *r = &redo[n_redo++];
+	r->what = undo_what;
+	snprintf(r->raw, sizeof r->raw, "%s", undo_raw);
+	r->line = undo_line;
+	snprintf(r->now_at, sizeof r->now_at, "%s", now_at);
+	r->fixed = fixed;
+}
+
+// Takes `rel` out of today's picks, if it's one of them.
+void unpick(const char *rel) {
+	for (int i = 0; i < n_picks; i++) {
+		if (strcmp(picks[i], rel) == 0) {
+			remove_pick(i);
+			return;
+		}
+	}
+}
+
+// Ctrl-R: does again what the last u undid, and puts its log line back.
+void do_redo(void) {
+	if (n_redo == 0) {
+		snprintf(status, sizeof status, "nothing to redo");
+		return;
+	}
+	Redo r = redo[n_redo - 1];
+	LogLine l = r.what;
+	char name[300], group[32], moved[600] = "";
+	note_title(l.note, name, sizeof name);
+	snprintf(group, sizeof group, "%.*s", (int)strcspn(l.note, "/"), l.note);
+
+	if (strcmp(l.action, "pick") == 0) {
+		if (n_picks < MAX_PICKS) {
+			snprintf(picks[n_picks++], sizeof picks[0], "%s", l.note);
+		}
+	} else if (strcmp(l.action, "focus") != 0) {
+		Entry e;
+		entry_at(r.now_at, &e);
+		struct stat st;
+		if (stat(e.path, &st) == -1) {
+			snprintf(status, sizeof status, "can't find %.200s anymore", r.now_at);
+			return;
+		}
+		int result;
+		if (strcmp(l.action, "done") == 0) {
+			result = move_note(&e, "Done", NULL, 0);
+			if (result == 0) done_today++;
+		} else if (strcmp(l.action, "park") == 0) {
+			result = park_note(&e);
+		} else if (strcmp(l.action, "move") == 0) {
+			char to[32];
+			snprintf(to, sizeof to, "%.*s", (int)strcspn(l.extra, "/"), l.extra);
+			result = move_note(&e, to, moved, sizeof moved);
+		} else {   // delete
+			char to[64];
+			snprintf(to, sizeof to, ".trash/%s", group);
+			result = move_note(&e, to, NULL, 0);
+		}
+		if (result == -1) {
+			snprintf(status, sizeof status, "couldn't move it: %s", strerror(errno));
+			return;
+		}
+		if (moved[0] != '\0') {   // a move: a picked note stays picked in its new place
+			for (int i = 0; i < n_picks; i++) {
+				if (strcmp(picks[i], r.now_at) == 0) snprintf(picks[i], sizeof picks[i], "%s", moved);
+			}
+		} else {
+			unpick(r.now_at);
+		}
+	}
+	change_log_line(r.line, r.raw, !r.fixed);
+	n_redo--;
+	save_today();
+	refresh_notes();
+	snprintf(status, sizeof status, "redone: %s · %.100s", l.action, name);
 }
 
 // u: says what it would undo, and waits for u again (or the minutes, for a focus).
@@ -2905,16 +3063,16 @@ void do_undo(void) {
 				snprintf(picks[i], sizeof picks[i], "%s", now_at);
 			}
 		}
-	} else if (strcmp(l.action, "pick") == 0) {
-		for (int i = 0; i < n_picks; i++) {
-			if (strcmp(picks[i], l.note) == 0) {
-				remove_pick(i);
-				break;
-			}
+	} else if (strcmp(l.action, "delete") == 0) {
+		if (move_back(l.extra, group, now_at, sizeof now_at) == -1) {
+			return;
 		}
+	} else if (strcmp(l.action, "pick") == 0) {
+		unpick(l.note);
 	}
 	save_today();
-	change_log_line(undo_line, NULL);
+	change_log_line(undo_line, NULL, 0);
+	remember_redo(now_at, 0);
 	refresh_notes();
 	snprintf(status, sizeof status, "undone: %s · %.100s", l.action, name);
 }
@@ -2925,7 +3083,8 @@ void fix_focus(void) {
 	char title[300];
 	note_title(undo_what.note, title, sizeof title);
 	if (real <= 0) {
-		change_log_line(undo_line, NULL);
+		change_log_line(undo_line, NULL, 0);
+		remember_redo("", 0);
 		snprintf(status, sizeof status, "undone: focus · %.100s", title);
 		return;
 	}
@@ -2936,7 +3095,8 @@ void fix_focus(void) {
 		return;
 	}
 	snprintf(line, sizeof line, "%.*s %s", (int)(last - undo_raw), undo_raw, spent);
-	change_log_line(undo_line, line);
+	change_log_line(undo_line, line, 0);
+	remember_redo("", 1);
 	snprintf(status, sizeof status, "focus on %.100s is %s now", title, spent);
 }
 
@@ -2973,6 +3133,10 @@ int undo_key(int key) {
 	}
 	if (key == 'u') {
 		ask_undo();
+		return 1;
+	}
+	if (key == 18) {   // 18 is Ctrl-R
+		do_redo();
 		return 1;
 	}
 	return 0;
@@ -3098,6 +3262,13 @@ int pick_key(int key) {
 		}
 		return 0;   // any other key only cancels
 	}
+	if (delete_asked) {
+		delete_asked = 0;
+		if (key == 'd') {
+			delete_note();
+		}
+		return 0;   // any other key only cancels
+	}
 	if (searching) {
 		search_key(key);   // letters go into the search, even q
 		return 0;
@@ -3138,6 +3309,12 @@ int pick_key(int key) {
 	} else if (key == KEY_ESC && search_len > 0) {
 		search_len = 0;   // Esc clears the search first; the next Esc goes back
 		search[0] = '\0';
+	} else if (key == 'd') {
+		keep_cursor_in_list();
+		if (visible_notes() > 0) {
+			delete_asked = 1;
+			snprintf(status, sizeof status, "d again deletes it, any other key cancels");
+		}
 	} else if (key == 'a') {
 		start_adding();
 	} else if (key == 'e') {
@@ -3587,12 +3764,14 @@ void print_usage(FILE *out) {
 		"            m then a number moves it to another group\n"
 		"            / searches the titles like vim: n next, N previous, Esc clears\n"
 		"            a adds a note in the marker's group, e opens it in $EDITOR\n"
+		"            dd deletes it: it goes to .trash/ in the notes folder\n"
 		"            t shows or hides all but NOW, r refresh, h history, P projects\n"
 		"  a note    d done, s next pick, p park (asks first), f focus, l list, e edit\n"
 		"            r refresh, h history, P projects, j/k scroll, q quit\n"
 		"  undo      u on the list, a note or the done screen undoes today's latest\n"
-		"            done, park, move or pick (asks first); u again goes further back.\n"
-		"            on a focus, it asks how many minutes it really was (0 removes it)\n"
+		"            done, park, move, pick or delete (asks first); u again goes\n"
+		"            further back, Ctrl-R redoes. on a focus, u asks how many\n"
+		"            minutes it really was (0 removes it)\n"
 		"  focus     space pause, f stop, d done, j/k scroll\n"
 		"            in a small window it shows only the timer\n"
 		"  history   what you did: a star chart of the weeks (bigger = more focus,\n"
