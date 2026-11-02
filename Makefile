@@ -6,7 +6,8 @@ atthing: main.c
 
 # After installing: if the shell can't find atthing there, say how to fix it.
 install: atthing
-	install -Dm755 atthing $(PREFIX)/bin/atthing
+	mkdir -p $(PREFIX)/bin
+	install -m755 atthing $(PREFIX)/bin/atthing
 	@case ":$$PATH:" in *":$(PREFIX)/bin:"*) ;; *) \
 		echo; \
 		echo "$(PREFIX)/bin is not in your PATH, so typing atthing won't find it yet."; \
@@ -21,6 +22,6 @@ uninstall:
 	rm -f $(PREFIX)/bin/atthing
 
 clean:
-	rm -f atthing atthing-asan
+	rm -rf atthing atthing-asan atthing.dSYM atthing-asan.dSYM
 
 .PHONY: install uninstall clean
