@@ -1,3 +1,4 @@
 atthing
 atthing-asan
 *.o
+*.dSYM/
