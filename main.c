@@ -2,6 +2,7 @@
 // Copyright (C) 2026 M. Ömer Okyar
 
 #define _POSIX_C_SOURCE 200809L   // asks the system headers for POSIX 2008, for sigaction
+#define _DARWIN_C_SOURCE          // macOS hides SIGWINCH under POSIX mode; this brings it back
 
 #include <ctype.h>     // toupper, tolower
 #include <errno.h>     // errno, EAGAIN, EEXIST

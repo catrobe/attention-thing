@@ -73,7 +73,7 @@ groups = now next try
 ```
 `groups` is optional: your own folders for the list, top first. `ATTHING_DIR=~/other atthing` uses another folder just this once.
 
-Plain C, no extra libraries. Linux for now.
+Plain C, no extra libraries. Works on Linux and macOS.
 
 ### Early
 This is so new and there is so much waiting to be made yet stay tuned! See [ROADMAP.md](ROADMAP.md).
