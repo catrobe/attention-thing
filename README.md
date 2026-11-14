@@ -1,6 +1,6 @@
 ## Attention Thing
 
-`atthing` things shouldn't and doesn't have to be complicated
+`atthing` one thing at a time. Things don't have to be complicated
 
 <img src="assets/demo.gif" alt="atthing in a terminal: picking three notes, focusing on one, marking one done, the star chart" width="720">
 
