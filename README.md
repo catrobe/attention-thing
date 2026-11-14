@@ -34,7 +34,7 @@ The first time you open it each day, you pick up to 3 notes from `now/`, `next/`
 | `e` | write in a note with your own editor (`$EDITOR`, e.g. nvim); atthing comes back when you close it |
 | `dd` | delete the note: it goes to `.trash/` in your notes folder (hidden in obsidian), and `u` brings it back |
 | `:trash` | the deleted notes: `Enter` brings one back, `:empty` deletes them all for good |
-| `m` then a number | move the note to another group's folder, e.g. from `now/` to `next/` |
+| `m` then a letter | move the note to another group's folder: `n` now, `N` next, `t` try. `m` `d` marks it done from the list. The line shows the letters |
 | `/` | search the titles like vim: the marker jumps while you type and the other notes go grey, `n` / `N` next and previous match, `Esc` clears |
 | `t` | show or hide everything but `now/` on the list |
 | `u` | undo the latest done, park, move, pick or delete from today (asks first); `u` again goes further back. On a focus you forgot to stop, it asks how many minutes it really was |
