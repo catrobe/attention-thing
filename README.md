@@ -34,6 +34,7 @@ The first time you open it each day, you pick up to 3 notes (or more, see Setup)
 | `e` | write in a note with your own editor (`$EDITOR`, e.g. nvim); atthing comes back when you close it |
 | `dd` | delete the note: it goes to `.trash/` in your notes folder (hidden in obsidian), and `u` brings it back |
 | `:trash` | the deleted notes: `Enter` brings one back, `:empty` deletes them all for good |
+| `:set` | change a number without leaving: `:set picks 5`, `:set goal 4`, `:set stars 25 60 120`. `:set` alone shows them |
 | `m` then a letter | move the note to another group's folder: `n` now, `N` next, `t` try. `m` `d` marks it done from the list. The line shows the letters |
 | `/` | search the titles like vim: the marker jumps while you type and the other notes go grey, `n` / `N` next and previous match, `Esc` clears |
 | `t` | show or hide everything but `now/` on the list |
@@ -62,7 +63,7 @@ make
 make install    # puts it in ~/.local/bin
 atthing
 ```
-The first time, it asks where your notes are (`~/notes` if you just press Enter) and makes the folders above inside it. `atthing setup` asks again.
+The first time, it asks where your notes are (`~/notes` if you just press Enter) and makes the folders above inside it. Then three short questions with the usual answers filled in: how many notes you pick, how many you want done in a day, and the star sizes. Enter keeps each one. `atthing setup` asks again.
 
 If the shell says `command not found`, `~/.local/bin` isn't in your PATH: `make install` prints the line to add. Or install it for everyone with `sudo make install PREFIX=/usr/local`.
 
@@ -74,7 +75,7 @@ picks = 3
 goal = 3
 stars = 25 60 120
 ```
-Only `dir` is needed. `groups` is your own folders for the list, top first. `picks` is how many notes you can pick (up to 9), `goal` is the 3 in `done 2/3`, and `stars` is the minutes of focus where a day on the chart becomes ✧, ✦ and ★. `ATTHING_DIR=~/other atthing` uses another folder just this once.
+You don't have to open this file: setup and `:set` write it. Only `dir` is needed. `groups` is your own folders for the list, top first. `picks` is how many notes you can pick (up to 9), `goal` is the 3 in `done 2/3`, and `stars` is the minutes of focus where a day on the chart becomes ✧, ✦ and ★. `ATTHING_DIR=~/other atthing` uses another folder just this once.
 
 Plain C, no extra libraries. Works on Linux and macOS.
 
