@@ -2399,7 +2399,7 @@ const KeyHelp keys_pick[] = {
 	{ "e", "write in it, in your editor" },
 	{ "dd", "delete (u brings it back)" },
 	{ ":trash", "deleted notes" },
-	{ "m", "move to another group" },
+	{ "m", "move to another group, or d: done" },
 	{ "/", "search, like vim" },
 	{ "n/N", "next or previous match" },
 	{ "t", "show or hide all but NOW" },
@@ -2701,10 +2701,12 @@ void move_in_list(int step) {
 	retype();
 }
 
-// m, then a number: moves the note under the marker into another group's
-// folder. Two keys, so it's always a choice you make.
+void move_to_group(int choice);
 
-int move_asked = 0;   // 1 after m: a number moves the note, any other key cancels
+// m, then a letter: moves the note under the marker into another group's
+// folder, or with d into Done/. Two keys, so it's always a choice you make.
+
+int move_asked = 0;   // 1 after m: a letter moves the note, any other key cancels
 
 // The groups the note under the marker can go to: every group but its own.
 // Writes their places in buckets[] into to[] and returns how many there are.
@@ -2718,24 +2720,93 @@ int move_targets(int to[]) {
 	return n;
 }
 
-// m: shows where the note can go, "move to:  [1] next  [2] try".
+// The letter that moves a note to group g: its first letter, "n" for now.
+// If a group before it has that letter, the capital: "N" for next. d is
+// taken by done. Returns 0 when both are taken (its number still works).
+char move_letter(int g) {
+	char first = buckets[g][0];
+	if (first >= 'A' && first <= 'Z') first += 'a' - 'A';
+	if (first < 'a' || first > 'z') {
+		return 0;
+	}
+	int taken = (first == 'd') ? 1 : 0;
+	for (int i = 0; i < g; i++) {
+		char other = buckets[i][0];
+		if (other >= 'A' && other <= 'Z') other += 'a' - 'A';
+		if (other == first) taken++;
+	}
+	if (taken == 0) return first;
+	if (taken == 1) return first - ('a' - 'A');
+	return 0;
+}
+
+// m: shows where the note can go, "move to:  [N] next  [t] try  [d] done".
 void ask_move(void) {
 	keep_cursor_in_list();
-	if (visible_notes() == 0 || n_buckets < 2) {
+	if (visible_notes() == 0) {
 		return;
 	}
 	int to[MAX_GROUPS];
 	int n = move_targets(to);
-	char where[160] = "";
+	char where[200] = "";
 	for (int i = 0; i < n; i++) {
 		size_t len = strlen(where);
-		snprintf(where + len, sizeof where - len, "  [%d] %s", i + 1, buckets[to[i]]);
+		char letter = move_letter(to[i]);
+		if (letter != 0) {
+			snprintf(where + len, sizeof where - len, "  [%c] %s", letter, buckets[to[i]]);
+		} else {
+			snprintf(where + len, sizeof where - len, "  [%d] %s", i + 1, buckets[to[i]]);
+		}
 	}
-	snprintf(status, sizeof status, "move to:%s · any other key cancels", where);
+	snprintf(status, sizeof status, "move to:%s  [d] done · any other key cancels", where);
 	move_asked = 1;
 }
 
-// The number after m. The note goes to the bottom of its new group, because
+// m then d: the note under the marker is done, without opening it first.
+// Same as d on a note: it goes to Done/, and u brings it back.
+void done_in_list(void) {
+	Entry e = entries[cursor];   // a copy, because reload() below refills entries[]
+	char was[300];
+	snprintf(was, sizeof was, "%s/%s", e.bucket, e.name);
+	remember_typed();
+	if (move_note(&e, "Done", NULL, 0) == -1) {
+		snprintf(status, sizeof status, "couldn't move it: %s", strerror(errno));
+		return;
+	}
+	log_action("done", &e, "");
+	done_today++;
+	for (int i = 0; i < n_picks; i++) {
+		if (strcmp(picks[i], was) == 0) {
+			remove_pick(i);
+			break;
+		}
+	}
+	if (current >= n_picks) {
+		current = 0;
+	}
+	save_today();
+	reload();
+	retype();
+	snprintf(status, sizeof status, "done · u brings it back");
+}
+
+// The key after m: a group's letter (or its number), or d for done.
+void move_key(int key) {
+	if (key == 'd') {
+		done_in_list();
+		return;
+	}
+	int to[MAX_GROUPS];
+	int n = move_targets(to);
+	for (int i = 0; i < n; i++) {
+		if (key == move_letter(to[i]) || key == '1' + i) {
+			move_to_group(i + 1);
+			return;
+		}
+	}
+}
+
+// Moves the note to the choice-th group it can go to. It goes to the bottom of its new group, because
 // .atthing/order doesn't have it there yet (same as a new note).
 void move_to_group(int choice) {
 	int to[MAX_GROUPS];
@@ -2970,6 +3041,29 @@ int find_undo(void) {
 			found = i;
 			undo_what = parts;
 			snprintf(undo_raw, sizeof undo_raw, "%s", line);
+		}
+	}
+	fclose(f);
+	return found;
+}
+
+// 1 if today's log has a pick line for `rel` ("now/cubesat.md"). A note done
+// with m d from the list may never have been picked.
+int picked_today(const char *rel) {
+	char path[1024], line[1024], today[16];
+	snprintf(path, sizeof path, "%s/log", state_dir);
+	date_string(time(NULL), today, sizeof today);
+	FILE *f = fopen(path, "r");
+	if (f == NULL) {
+		return 0;
+	}
+	int found = 0;
+	while (fgets(line, sizeof line, f) != NULL) {
+		line[strcspn(line, "\r\n")] = '\0';
+		LogLine parts;
+		if (strncmp(line, today, 10) == 0 && parse_log_line(line, &parts) == 0 &&
+		    strcmp(parts.action, "pick") == 0 && strcmp(parts.note, rel) == 0) {
+			found = 1;
 		}
 	}
 	fclose(f);
@@ -3212,7 +3306,7 @@ void do_undo(void) {
 		} else if (done_today > 0) {
 			done_today--;
 		}
-		if (n_picks < MAX_PICKS) {   // it was a pick before it got done or parked
+		if (n_picks < MAX_PICKS && picked_today(l.note)) {   // a pick again, if it was one
 			snprintf(picks[n_picks], sizeof picks[n_picks], "%s", now_at);
 			n_picks++;
 		}
@@ -3561,9 +3655,7 @@ int pick_key(int key) {
 	status[0] = '\0';
 	if (move_asked) {
 		move_asked = 0;
-		if (key >= '1' && key <= '9') {
-			move_to_group(key - '0');
-		}
+		move_key(key);
 		return 0;   // any other key only cancels
 	}
 	if (delete_asked) {
@@ -4075,7 +4167,7 @@ void print_usage(FILE *out) {
 		"keys (? on any screen shows them):\n"
 		"  picking   type numbers + Enter, Esc back, q quit\n"
 		"            j/k or arrows go up/down, J/K or Shift+arrows move a note\n"
-		"            m then a number moves it to another group\n"
+		"            m then a letter moves it to another group, m d is done\n"
 		"            / searches the titles like vim: n next, N previous, Esc clears\n"
 		"            a adds a note in the marker's group, e opens it in $EDITOR\n"
 		"            dd deletes it: it goes to .trash/ in the notes folder\n"
