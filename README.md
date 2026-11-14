@@ -19,7 +19,7 @@ your-notes/
 └── Projects.md  optional, see below
 ```
 
-The first time you open it each day, you pick up to 3 notes from `now/`, `next/` and `try/` by typing their numbers. After that it shows them one at a time.
+The first time you open it each day, you pick up to 3 notes (or more, see Setup) from `now/`, `next/` and `try/` by typing their numbers. After that it shows them one at a time.
 
 | key | what it does |
 |---|---|
@@ -70,8 +70,11 @@ The answer is saved in `~/.config/atthing/config`, a plain text file:
 ```
 dir = ~/notes
 groups = now next try
+picks = 3
+goal = 3
+stars = 25 60 120
 ```
-`groups` is optional: your own folders for the list, top first. `ATTHING_DIR=~/other atthing` uses another folder just this once.
+Only `dir` is needed. `groups` is your own folders for the list, top first. `picks` is how many notes you can pick (up to 9), `goal` is the 3 in `done 2/3`, and `stars` is the minutes of focus where a day on the chart becomes ✧, ✦ and ★. `ATTHING_DIR=~/other atthing` uses another folder just this once.
 
 Plain C, no extra libraries. Works on Linux and macOS.
 
