@@ -90,7 +90,7 @@ You don't have to open this file: setup and `:set` write it. Only `dir` is neede
 Plain C, no extra libraries. Works on Linux and macOS.
 
 <p>
-<picture><source media="(prefers-color-scheme: dark)" srcset="assets/the-story-dark.svg"><img src="assets/the-story-light.svg" alt="The Story" height="56"></picture><br>
+<picture><source media="(prefers-color-scheme: dark)" srcset="assets/the-story-dark.svg"><img src="assets/the-story-light.svg" alt="The Story" height="66"></picture><br>
 You know when you have soooOooO many interests and things you want or have to do, and getting overwhelmed is so easy. You can't keep everything in your mind, and you don't want to let go either, because these ideas are really your fuel in life...
 </p>
 
