@@ -55,6 +55,15 @@ if it closes things, not if it opens more.
 - [x] Delete with `dd` (into `.trash/`), redo with `Ctrl-R`
 - [x] `:trash` to see deleted notes, bring them back or empty the trash
 
+## v0.6: your own numbers, and fewer keys to remember (released)
+
+- [x] Move a note with `m` then a letter: `n` now, `N` next, `t` try
+- [x] Mark a note done from the list with `m` `d`
+- [x] Pick more than 3 notes, set your daily goal and the star sizes
+- [x] Setup asks for them, and `:set` changes them without leaving
+- [x] A short `--help` that says what atthing is
+- [x] README with a gif and the story behind it
+
 ## Next
 
 - Parked and someday notes come back when their time comes
