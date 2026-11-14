@@ -22,9 +22,8 @@
 #define VERSION     "0.5.0"
 #define MAX_ENTRIES 128
 #define MAX_BODY    4096  // longest note text we keep, in bytes
-#define MAX_PICKS   3     // how many notes you pick at a time
+#define MAX_PICKS   9     // the most picks = in the config can ask for
 #define MAX_SEEN    1024  // how many first-seen dates we remember
-#define DAILY_GOAL  3     // the "/3" in "done 2/3"
 #define MAX_GROUPS  8     // folders on the list, like now/ next/ try/
 
 typedef struct {
@@ -46,6 +45,11 @@ int n_entries = 0;
 // fold away together with t. "groups = ..." in the config changes them.
 char buckets[MAX_GROUPS][16] = { "now", "next", "try" };
 int n_buckets = 3;
+
+// Numbers the config file can change (see load_config).
+int max_picks = 3;                   // picks = 3: how many notes you pick at a time
+int daily_goal = 3;                  // goal = 3: the "/3" in "done 2/3"
+int star_at[3] = { 25, 60, 120 };    // stars = 25 60 120: minutes where a day becomes ✧ ✦ ★
 int group_first[MAX_GROUPS];   // where each group's notes start in entries[]
 int group_size[MAX_GROUPS];    // how many notes each group has
 
@@ -252,6 +256,19 @@ void load_config(void) {
 			snprintf(config_dir, sizeof config_dir, "%s", value);
 		} else if (strcmp(key, "groups") == 0) {
 			set_groups(value);
+		} else if (strcmp(key, "picks") == 0) {
+			int n = atoi(value);
+			if (n >= 1 && n <= MAX_PICKS) max_picks = n;
+		} else if (strcmp(key, "goal") == 0) {
+			int n = atoi(value);
+			if (n >= 1 && n <= 99) daily_goal = n;
+		} else if (strcmp(key, "stars") == 0) {
+			int a, b, c;   // only taken when all three are there and each is bigger
+			if (sscanf(value, "%d %d %d", &a, &b, &c) == 3 && a > 0 && a < b && b < c) {
+				star_at[0] = a;
+				star_at[1] = b;
+				star_at[2] = c;
+			}
 		}
 	}
 	fclose(f);
@@ -283,6 +300,11 @@ int save_config(const char *dir) {
 	} else {
 		fprintf(f, "# groups = now next try\n");
 	}
+	// the numbers: a real line if you changed one, the default as a comment if not
+	fprintf(f, "%spicks = %d\n", max_picks == 3 ? "# " : "", max_picks);
+	fprintf(f, "%sgoal = %d\n", daily_goal == 3 ? "# " : "", daily_goal);
+	int own_stars = star_at[0] != 25 || star_at[1] != 60 || star_at[2] != 120;
+	fprintf(f, "%sstars = %d %d %d\n", own_stars ? "" : "# ", star_at[0], star_at[1], star_at[2]);
 	return finish_write(f, tmp, config_path);
 }
 
@@ -414,7 +436,7 @@ void load_today(void) {
 	if (fgets(line, sizeof line, f) != NULL) {
 		sscanf(line, "done %d", &done_today);
 	}
-	while (n_picks < MAX_PICKS && fgets(line, sizeof line, f) != NULL) {
+	while (n_picks < max_picks && fgets(line, sizeof line, f) != NULL) {
 		line[strcspn(line, "\r\n")] = '\0';
 		if (line[0] != '\0') {
 			snprintf(picks[n_picks], sizeof picks[n_picks], "%s", line);
@@ -1464,7 +1486,7 @@ void draw_pick_screen(void) {
 	int width = cols - 4;
 
 	char head[64];
-	snprintf(head, sizeof head, "PICK UP TO %d · done %d/%d", MAX_PICKS, done_today, DAILY_GOAL);
+	snprintf(head, sizeof head, "PICK UP TO %d · done %d/%d", max_picks, done_today, daily_goal);
 	draw_styled("\x1b[2m", head, 2, left, width, 1);
 
 	int list_top = 4;
@@ -1571,7 +1593,7 @@ void draw_note_screen(void) {
 		snprintf(age, sizeof age, "%ld days", days);
 	}
 	snprintf(header, sizeof header, "%s · %s · %d of %d · done %d/%d",
-	         bucket, age, current + 1, n_picks, done_today, DAILY_GOAL);
+	         bucket, age, current + 1, n_picks, done_today, daily_goal);
 	draw_styled("\x1b[2m", header, 2, left, width, 1);
 
 	int title_rows = draw_styled("\x1b[1m", e->title, 4, left, width, 2);
@@ -1596,7 +1618,7 @@ void draw_done_screen(void) {
 	int left = 3;
 	int width = cols - 4;
 	char line[64];
-	snprintf(line, sizeof line, "done %d/%d", done_today, DAILY_GOAL);
+	snprintf(line, sizeof line, "done %d/%d", done_today, daily_goal);
 	draw_styled("\x1b[1m", line, 4, left, width, 1);
 	char nothing[160] = "nothing picked right now";
 	if (n_entries == 0) {
@@ -1926,9 +1948,9 @@ void draw_day_note(const DayNote *d, int row, int left, int width) {
 // ✦ under two, ★ two hours or more. Done without focus: the smallest star.
 const char *chart_star(long focus, int done) {
 	if (focus == 0) return done > 0 ? "‧" : "·";
-	if (focus < 25 * 60) return "‧";
-	if (focus < 3600) return "✧";
-	if (focus < 2 * 3600) return "✦";
+	if (focus < star_at[0] * 60) return "‧";
+	if (focus < star_at[1] * 60) return "✧";
+	if (focus < star_at[2] * 60) return "✦";
 	return "★";
 }
 
@@ -2392,7 +2414,7 @@ typedef struct {
 
 // One list per screen. { NULL, NULL } marks the end.
 const KeyHelp keys_pick[] = {
-	{ "0-9, Enter", "pick up to 3" },
+	{ "0-9, Enter", "pick notes for today" },
 	{ "j/k, arrows", "up and down" },
 	{ "J/K", "move up or down" },
 	{ "a", "add a note here" },
@@ -2591,8 +2613,8 @@ int confirm_picks(void) {
 		if (duplicate) {
 			continue;
 		}
-		if (count == MAX_PICKS) {
-			snprintf(status, sizeof status, "up to %d", MAX_PICKS);
+		if (count == max_picks) {
+			snprintf(status, sizeof status, "up to %d", max_picks);
 			return -1;
 		}
 		chosen[count++] = (int)number - 1;
@@ -3212,7 +3234,7 @@ void do_redo(void) {
 	snprintf(group, sizeof group, "%.*s", (int)strcspn(l.note, "/"), l.note);
 
 	if (strcmp(l.action, "pick") == 0) {
-		if (n_picks < MAX_PICKS) {
+		if (n_picks < max_picks) {
 			snprintf(picks[n_picks++], sizeof picks[0], "%s", l.note);
 		}
 	} else if (strcmp(l.action, "focus") != 0) {
@@ -3306,7 +3328,7 @@ void do_undo(void) {
 		} else if (done_today > 0) {
 			done_today--;
 		}
-		if (n_picks < MAX_PICKS && picked_today(l.note)) {   // a pick again, if it was one
+		if (n_picks < max_picks && picked_today(l.note)) {   // a pick again, if it was one
 			snprintf(picks[n_picks], sizeof picks[n_picks], "%s", now_at);
 			n_picks++;
 		}
@@ -4153,7 +4175,7 @@ void print_usage(FILE *out) {
 		"atthing " VERSION " - one thing at a time\n"
 		"\n"
 		"usage:\n"
-		"  atthing            open it (the first time each day you pick up to 3)\n"
+		"  atthing            open it (the first time each day you pick your notes)\n"
 		"  atthing pick       pick again\n"
 		"  atthing setup      choose the notes folder again\n"
 		"  atthing --help     this text\n"
