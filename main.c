@@ -19,7 +19,7 @@
 #include <termios.h>   // tcgetattr, tcsetattr: raw mode
 #include <unistd.h>    // read, write, isatty, fork, execl
 
-#define VERSION     "0.5.0"
+#define VERSION     "0.6.0"
 #define MAX_ENTRIES 128
 #define MAX_BODY    4096  // longest note text we keep, in bytes
 #define MAX_PICKS   9     // the most picks = in the config can ask for
