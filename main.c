@@ -233,6 +233,37 @@ void set_groups(char *text) {
 	}
 }
 
+// "picks", "5" -> max_picks = 5. Used by the config file, :set and setup, so
+// all three agree on what's allowed. Returns 0, or -1 if the value won't do
+// (then nothing changes) or it isn't one of the three names.
+int set_number(const char *key, const char *value) {
+	if (strcmp(key, "picks") == 0) {
+		int n = atoi(value);
+		if (n < 1 || n > MAX_PICKS) return -1;
+		max_picks = n;
+	} else if (strcmp(key, "goal") == 0) {
+		int n = atoi(value);
+		if (n < 1 || n > 99) return -1;
+		daily_goal = n;
+	} else if (strcmp(key, "stars") == 0) {
+		int a, b, c;   // only taken when all three are there and each is bigger
+		if (sscanf(value, "%d %d %d", &a, &b, &c) != 3 || a < 1 || a >= b || b >= c) return -1;
+		star_at[0] = a;
+		star_at[1] = b;
+		star_at[2] = c;
+	} else {
+		return -1;
+	}
+	return 0;
+}
+
+// What to say when set_number() didn't take a value.
+const char *number_help(const char *key) {
+	if (strcmp(key, "picks") == 0) return "a number from 1 to 9";
+	if (strcmp(key, "goal") == 0) return "a number from 1 to 99";
+	return "three numbers, each bigger than the last, like 25 60 120";
+}
+
 void load_config(void) {
 	if (config_path[0] == '\0') {
 		return;
@@ -256,19 +287,8 @@ void load_config(void) {
 			snprintf(config_dir, sizeof config_dir, "%s", value);
 		} else if (strcmp(key, "groups") == 0) {
 			set_groups(value);
-		} else if (strcmp(key, "picks") == 0) {
-			int n = atoi(value);
-			if (n >= 1 && n <= MAX_PICKS) max_picks = n;
-		} else if (strcmp(key, "goal") == 0) {
-			int n = atoi(value);
-			if (n >= 1 && n <= 99) daily_goal = n;
-		} else if (strcmp(key, "stars") == 0) {
-			int a, b, c;   // only taken when all three are there and each is bigger
-			if (sscanf(value, "%d %d %d", &a, &b, &c) == 3 && a > 0 && a < b && b < c) {
-				star_at[0] = a;
-				star_at[1] = b;
-				star_at[2] = c;
-			}
+		} else {
+			set_number(key, value);   // picks, goal, stars; anything else is skipped
 		}
 	}
 	fclose(f);
@@ -290,7 +310,9 @@ int save_config(const char *dir) {
 		return -1;
 	}
 	fprintf(f, "# atthing settings\n");
-	fprintf(f, "dir = %s\n", dir);
+	if (dir[0] != '\0') {   // empty when the folder only comes from ATTHING_DIR
+		fprintf(f, "dir = %s\n", dir);
+	}
 	if (config_groups) {
 		fprintf(f, "groups =");
 		for (int g = 0; g < n_buckets; g++) {
@@ -2421,6 +2443,7 @@ const KeyHelp keys_pick[] = {
 	{ "e", "write in it, in your editor" },
 	{ "dd", "delete (u brings it back)" },
 	{ ":trash", "deleted notes" },
+	{ ":set", "picks, goal, stars" },
 	{ "m", "move to another group, or d: done" },
 	{ "/", "search, like vim" },
 	{ "n/N", "next or previous match" },
@@ -3612,6 +3635,34 @@ void start_command(void) {
 	command[0] = '\0';
 }
 
+// :set picks 5, :set goal 4, :set stars 25 60 120. Changes the number now and
+// writes it into the config file. :set alone shows the three as they are.
+void run_set(char *rest) {
+	if (rest[0] == '\0') {
+		snprintf(status, sizeof status, "picks %d · goal %d · stars %d %d %d",
+		         max_picks, daily_goal, star_at[0], star_at[1], star_at[2]);
+		return;
+	}
+	char *value = rest + strcspn(rest, " ");   // "picks 5": the space splits name and value
+	if (*value != '\0') {
+		*value++ = '\0';
+	}
+	value = trim(value);
+	if (strcmp(rest, "picks") != 0 && strcmp(rest, "goal") != 0 && strcmp(rest, "stars") != 0) {
+		snprintf(status, sizeof status, ":set knows picks, goal and stars");
+		return;
+	}
+	if (set_number(rest, value) == -1) {
+		snprintf(status, sizeof status, "%s needs %s", rest, number_help(rest));
+		return;
+	}
+	if (config_path[0] == '\0' || save_config(config_dir) == -1) {
+		snprintf(status, sizeof status, "changed, but couldn't save the settings: %s", strerror(errno));
+		return;
+	}
+	snprintf(status, sizeof status, "%s = %s · saved", rest, value);
+}
+
 // Enter after :something. Each screen has its own commands.
 void run_command(void) {
 	char *c = trim(command);
@@ -3619,6 +3670,8 @@ void run_command(void) {
 		open_trash();
 	} else if (view == VIEW_TRASH && strcmp(c, "empty") == 0) {
 		empty_trash();
+	} else if (view == VIEW_PICK && (strcmp(c, "set") == 0 || strncmp(c, "set ", 4) == 0)) {
+		run_set(trim(c + 3));
 	} else if (c[0] != '\0') {
 		snprintf(status, sizeof status, "there's no :%.24s here", c);
 	}
@@ -3956,29 +4009,62 @@ int projects_key(int key) {
 
 char setup_input[400] = "~/notes";
 int setup_len = 7;
+int setup_step = 0;   // 0 the folder, then 1 picks, 2 goal, 3 stars
+
+const char *setup_keys[] = { "", "picks", "goal", "stars" };
+const char *setup_asks[] = {
+	"where are your notes?",
+	"how many notes do you pick at a time?",
+	"how many do you want done in a day?",
+	"how many minutes of focus make a day's star bigger?",
+};
+const char *setup_hints[] = {
+	"",
+	"1 to 9. Enter keeps it",
+	"it's the 3 in \"done 2/3\". Enter keeps it",
+	"three numbers, for ✧ ✦ ★ on the chart. Enter keeps it",
+};
+
+// Puts the number this step asks about into the typing line, as it is now.
+void fill_setup_input(void) {
+	if (setup_step == 1) {
+		snprintf(setup_input, sizeof setup_input, "%d", max_picks);
+	} else if (setup_step == 2) {
+		snprintf(setup_input, sizeof setup_input, "%d", daily_goal);
+	} else {
+		snprintf(setup_input, sizeof setup_input, "%d %d %d", star_at[0], star_at[1], star_at[2]);
+	}
+	setup_len = (int)strlen(setup_input);
+}
 
 void draw_setup_screen(void) {
 	int rows, cols;
 	if (begin_frame(&rows, &cols) == 0) {
 		int left = 3;
 		int width = cols - 4;
-		draw_styled("\x1b[2m", "SETUP", 2, left, width, 1);
-		draw_styled("\x1b[1m", "where are your notes?", 4, left, width, 1);
+		char head[32];
+		snprintf(head, sizeof head, "SETUP · %d of 4", setup_step + 1);
+		draw_styled("\x1b[2m", head, 2, left, width, 1);
+		draw_styled("\x1b[1m", setup_asks[setup_step], 4, left, width, 1);
 		char line[sizeof setup_input + 8];
 		snprintf(line, sizeof line, "%s_", setup_input);
 		draw_wrapped(line, 6, left, width, 2);
 
-		char folders[160] = "";
-		for (int g = 0; g < n_buckets; g++) {
-			size_t len = strlen(folders);
-			snprintf(folders + len, sizeof folders - len, "%s/ ", buckets[g]);
-		}
-		char made[256];
-		snprintf(made, sizeof made, "atthing makes the folders that aren't there yet: %ssomeday/ Done/", folders);
-		draw_styled("\x1b[2m", made, 9, left, width, 3);
-		if (getenv("ATTHING_DIR") != NULL) {
-			draw_styled("\x1b[2m", "ATTHING_DIR is set, so it wins over this until you unset it",
-			            13, left, width, 2);
+		if (setup_step == 0) {
+			char folders[160] = "";
+			for (int g = 0; g < n_buckets; g++) {
+				size_t len = strlen(folders);
+				snprintf(folders + len, sizeof folders - len, "%s/ ", buckets[g]);
+			}
+			char made[256];
+			snprintf(made, sizeof made, "atthing makes the folders that aren't there yet: %ssomeday/ Done/", folders);
+			draw_styled("\x1b[2m", made, 9, left, width, 3);
+			if (getenv("ATTHING_DIR") != NULL) {
+				draw_styled("\x1b[2m", "ATTHING_DIR is set, so it wins over this until you unset it",
+				            13, left, width, 2);
+			}
+		} else {
+			draw_styled("\x1b[2m", setup_hints[setup_step], 9, left, width, 2);
 		}
 		if (status[0] != '\0') {
 			draw_styled("\x1b[2m", status, rows - 2, left, width, 1);
@@ -3988,9 +4074,9 @@ void draw_setup_screen(void) {
 	write_all(frame, frame_len);
 }
 
-// Enter on the setup screen: makes the folder and the ones inside it, and
-// saves it in the config. Returns 0 if it worked, -1 with a message in `status` if not.
-int finish_setup(void) {
+// Enter on the first setup question: makes the folder and the ones inside it.
+// Returns 0 if it worked, -1 with a message in `status` if not.
+int setup_folder(void) {
 	char *typed = trim(setup_input);
 	size_t n = strlen(typed);
 	while (n > 1 && typed[n - 1] == '/') {
@@ -4027,11 +4113,33 @@ int finish_setup(void) {
 		snprintf(status, sizeof status, "couldn't make the folders inside: %s", strerror(errno));
 		return -1;
 	}
-	if (config_path[0] == '\0' || save_config(saved) == -1) {
-		snprintf(status, sizeof status, "couldn't save the settings: %s", strerror(errno));
-		return -1;
-	}
+	snprintf(config_dir, sizeof config_dir, "%.399s", saved);
 	return 0;
+}
+
+// Enter on a setup question. Returns 1 when the last one is answered and the
+// settings are saved, 0 to keep asking (the next question, or this one again
+// with a message in `status`).
+int setup_enter(void) {
+	if (setup_step == 0) {
+		if (setup_folder() == -1) {
+			setup_len = (int)strlen(setup_input);   // setup_folder may have cut spaces or a /
+			return 0;
+		}
+	} else if (set_number(setup_keys[setup_step], trim(setup_input)) == -1) {
+		snprintf(status, sizeof status, "%s", number_help(setup_keys[setup_step]));
+		return 0;
+	}
+	if (setup_step < 3) {
+		setup_step++;
+		fill_setup_input();
+		return 0;
+	}
+	if (config_path[0] == '\0' || save_config(config_dir) == -1) {
+		snprintf(status, sizeof status, "couldn't save the settings: %s", strerror(errno));
+		return 0;
+	}
+	return 1;
 }
 
 // Returns 0 once the notes folder is set up, 1 to quit.
@@ -4071,10 +4179,9 @@ int run_setup(void) {
 		if (key == KEY_ESC || key == 3) {   // 3 is Ctrl-C
 			return 1;
 		} else if (key == '\r' || key == '\n') {
-			if (finish_setup() == 0) {
+			if (setup_enter()) {
 				return 0;
 			}
-			setup_len = (int)strlen(setup_input);   // finish_setup may have cut spaces or a /
 		} else if (key == 21) {   // Ctrl-U clears it
 			setup_len = 0;
 			setup_input[0] = '\0';
@@ -4177,7 +4284,7 @@ void print_usage(FILE *out) {
 		"usage:\n"
 		"  atthing            open it (the first time each day you pick your notes)\n"
 		"  atthing pick       pick again\n"
-		"  atthing setup      choose the notes folder again\n"
+		"  atthing setup      choose the notes folder, picks, goal and stars again\n"
 		"  atthing --help     this text\n"
 		"  atthing --version  the version\n"
 		"\n"
@@ -4195,6 +4302,8 @@ void print_usage(FILE *out) {
 		"            dd deletes it: it goes to .trash/ in the notes folder\n"
 		"            :trash shows the deleted notes: Enter brings one back,\n"
 		"            :empty deletes them all for good\n"
+		"            :set picks 5, :set goal 4, :set stars 25 60 120 change the\n"
+		"            numbers and save them, :set alone shows them\n"
 		"            t shows or hides all but NOW, r refresh, h history, P projects\n"
 		"  a note    d done, s next pick, p park (asks first), f focus, l list, e edit\n"
 		"            r refresh, h history, P projects, j/k scroll, q quit\n"
