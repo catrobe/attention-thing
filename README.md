@@ -89,6 +89,23 @@ You don't have to open this file: setup and `:set` write it. Only `dir` is neede
 
 Plain C, no extra libraries. Works on Linux and macOS.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/the-story-dark.svg">
+  <img src="assets/the-story-light.svg" alt="The Story" height="90">
+</picture>
+
+You know when you have soooOooO many interests and things you want or have to do, and getting overwhelmed is so easy. You can't keep everything in your mind, and you don't want to let go either, because these ideas are really your fuel in life...
+
+I tried writing everything down, on paper and digitally. It works, but not as much as I wanted.
+
+So I built `atthing`, short for attention-thing.
+
+Now I can let go of the things on my mind in a somewhat organized way and focus on *one thing at a time*. I don't have to think about my Calc III exam when I'm trying to code my game lol
+
+This is not a miracle app that does things for you. It is mostly a symbol, a metaphor that works for me: once a thing is in here, it can leave my mind (mostly doesn't lol but it helps)
+
+A sheet of paper and a pencil can do the same. But I live in terminals, and making this was fun.
+
 ### Early
 This is so new and there is so much waiting to be made yet stay tuned! See [ROADMAP.md](ROADMAP.md).
 
