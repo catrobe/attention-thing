@@ -12,7 +12,7 @@ Point it at a folder of text/md notes, split by how big each thing is:
 your-notes/
 ├── now/        under an hour
 ├── next/       after now, less urgent
-├── try/        experiments
+├── try/        experiments, or what comes after next
 ├── someday/    can wait forever
 ├── Done/
 ├── Parked.md
@@ -21,30 +21,40 @@ your-notes/
 
 The first time you open it each day, you pick up to 3 notes (or more, see Setup) from `now/`, `next/` and `try/` by typing their numbers. After that it shows them one at a time.
 
+The keys you use every day:
+
 | key | what it does |
 |---|---|
 | `d` | done, moves the note to `Done/` |
-| `p` | park, moves it to `someday/` and writes it into `Parked.md` with the date (asks first) |
 | `s` | next pick |
 | `f` | focus: only the note and a timer (`space` pauses). In a small window, only the timer |
 | `l` | back to the list, to see it or change what you picked (`Esc` goes back) |
 | `j` `k` / arrows | move on the list, scroll a long note |
-| `J` `K` / Shift+arrows | move a note up or down on the list, to put them in your own order |
 | `a` | add a note: type its title, and it's made in the group the `>` marker is in |
+| `m` then a letter | move the note to another group's folder: `n` now, `N` next, `t` try. `m` `d` marks it done from the list. The line shows the letters |
+| `u` | undo the latest done, park, move, pick or delete from today (asks first); `u` again goes further back. On a focus you forgot to stop, it asks how many minutes it really was |
+| `h` | what you did, day by day, under a star chart of the weeks: a bigger star is more focus time, a bright one is a day you got something done |
+| `?` | every key for the screen you're on |
+| `q` | quit |
+
+<details>
+<summary>all the other keys</summary>
+
+| key | what it does |
+|---|---|
+| `p` | park, moves it to `someday/` and writes it into `Parked.md` with the date (asks first) |
+| `J` `K` / Shift+arrows | move a note up or down on the list, to put them in your own order |
 | `e` | write in a note with your own editor (`$EDITOR`, e.g. nvim); atthing comes back when you close it |
 | `dd` | delete the note: it goes to `.trash/` in your notes folder (hidden in obsidian), and `u` brings it back |
 | `:trash` | the deleted notes: `Enter` brings one back, `:empty` deletes them all for good |
 | `:set` | change a number without leaving: `:set picks 5`, `:set goal 4`, `:set stars 25 60 120`. `:set` alone shows them |
-| `m` then a letter | move the note to another group's folder: `n` now, `N` next, `t` try. `m` `d` marks it done from the list. The line shows the letters |
 | `/` | search the titles like vim: the marker jumps while you type and the other notes go grey, `n` / `N` next and previous match, `Esc` clears |
 | `t` | show or hide everything but `now/` on the list |
-| `u` | undo the latest done, park, move, pick or delete from today (asks first); `u` again goes further back. On a focus you forgot to stop, it asks how many minutes it really was |
 | `Ctrl-R` | redo what `u` undid, like vim |
 | `r` | look at the folders again, after changing notes somewhere else. Works on history and projects too, and the list does it by itself each time you go back to it |
-| `h` | what you did, day by day, under a star chart of the weeks: a bigger star is more focus time, a bright one is a day you got something done |
 | `P` | projects |
-| `?` | every key for the screen you're on |
-| `q` | quit |
+
+</details>
 
 Nothing gets deleted. atthing keeps its own memory in a hidden `.atthing/` folder inside your notes folder: today's picks, the day it first saw each note, the order you put them in, and a log of everything you did. If you use obsidian it doesn't show up there.
 
